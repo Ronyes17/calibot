@@ -44,7 +44,15 @@ class GoogleCalendarService:
 
         # store client_config and redirect_uri to use in the callback function.
         with open("client_config.pickle", "wb") as f:
-            pickle.dump({"client_secrets_file": GOOGLE_CLIENT_SECRET_FILE, "scopes": GOOGLE_API_SCOPES, "redirect_uri": self.redirect_uri}, f)
+            pickle.dump({
+                "client_secrets_file": GOOGLE_CLIENT_SECRET_FILE,
+                "scopes": GOOGLE_API_SCOPES,
+                "redirect_uri": self.redirect_uri,
+                # PKCE: הספרייה מייצרת code_verifier בזמן authorization_url.
+                # ה-callback בונה אובייקט Flow חדש, ובלי לשמור אותו כאן
+                # החלפת ה-code נכשלת ב-"Missing code verifier".
+                "code_verifier": getattr(flow, "code_verifier", None),
+            }, f)
 
         return auth_url
 
@@ -74,6 +82,8 @@ class GoogleCalendarService:
                 scopes=client_config["scopes"],
                 redirect_uri=client_config["redirect_uri"]
             )
+            if client_config.get("code_verifier"):
+                flow.code_verifier = client_config["code_verifier"]
             flow.fetch_token(code=code)
             self.credentials = flow.credentials
 

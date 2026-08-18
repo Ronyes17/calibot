@@ -10,17 +10,18 @@ def escape_markdown(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
-async def send_telegram_message(chat_id: int, text: str, parse_mode: str = "MarkdownV2"):
-        """Send message to Telegram chat"""
-        # escaped_text = escape_markdown(text)
+async def send_telegram_message(chat_id: int, text: str, parse_mode: str = None):
+        """
+        שליחת הודעה. ברירת המחדל היא טקסט רגיל ולא MarkdownV2 —
+        טקסט עברי עם נקודות, מקפים וסוגריים נדחה על ידי טלגרם
+        אם לא בורחים מכל תו מיוחד.
+        """
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{TELEGRAM_API_BASE}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    parse_mode: parse_mode,
-                }
+                f"{TELEGRAM_API_BASE}/sendMessage", json=payload
             )
             return response.json()
 
