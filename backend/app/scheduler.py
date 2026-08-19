@@ -16,6 +16,7 @@
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Optional
@@ -34,10 +35,16 @@ logger = logging.getLogger(__name__)
 
 TZ = ZoneInfo("Asia/Jerusalem")
 
-MORNING_HOUR, MORNING_MINUTE = 7, 30
-EVENING_HOUR, EVENING_MINUTE = 21, 0
-NUDGE_HOUR, NUDGE_MINUTE = 11, 0
-BACKUP_HOUR, BACKUP_MINUTE = 3, 30
+# שעות הג'ובים נקראות מהסביבה כדי שאפשר יהיה לשנות בלי לגעת בקוד.
+# שינוי דורש רק עריכת .env והפעלה מחדש של השירות.
+MORNING_HOUR = int(os.getenv("MORNING_HOUR", 7))
+MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", 30))
+EVENING_HOUR = int(os.getenv("EVENING_HOUR", 21))
+EVENING_MINUTE = int(os.getenv("EVENING_MINUTE", 0))
+NUDGE_HOUR = int(os.getenv("NUDGE_HOUR", 11))
+NUDGE_MINUTE = int(os.getenv("NUDGE_MINUTE", 0))
+BACKUP_HOUR = int(os.getenv("BACKUP_HOUR", 3))
+BACKUP_MINUTE = int(os.getenv("BACKUP_MINUTE", 30))
 
 
 @dataclass

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import os
 import pickle
 from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -161,7 +161,7 @@ class GoogleCalendarService:
         if self.credentials and self.credentials.expired and self.credentials.refresh_token:
             try:
                 logger.info("🔄 Refreshing expired credentials...")
-                self.credentials.refresh(Request())
+                self.credentials.refresh(GoogleAuthRequest())
                 with open(self.token_path, 'wb') as token:
                     pickle.dump(self.credentials, token)
                 logger.info("✅ Credentials refreshed successfully.")
