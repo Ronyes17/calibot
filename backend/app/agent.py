@@ -11,6 +11,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -25,7 +26,10 @@ from app import travel
 logger = logging.getLogger(__name__)
 
 TZ = ZoneInfo("Asia/Jerusalem")
-MODEL = "gemini/gemini-2.5-flash"
+# הספק והמודל נקבעים מהסביבה. ברירת המחדל: Groq, כי Gemini חסום
+# גיאוגרפית מ-IP של דאטהסנטרים (נכון לאוגוסט 2026).
+# החלפת מודל = שינוי LLM_MODEL ב-.env והפעלה מחדש, בלי לגעת בקוד.
+MODEL = os.getenv("LLM_MODEL", "groq/openai/gpt-oss-120b")
 MAX_ROUNDS = 3
 
 WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]

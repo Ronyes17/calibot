@@ -4,15 +4,12 @@
 הזרימה: טלגרם שולח voice -> מורידים את הקובץ -> תמלול -> הטקסט נכנס
 לאותו pipeline בדיוק כמו הודעת טקסט. אין מסלול נפרד.
 
-למה Gemini לתמלול ולא Whisper מקומי:
-    ה-droplet שלך כבר מריץ את בוט המסחר, ויש לו היסטוריה של OOM.
-    להריץ שם מודל תמלול מקומי זה להזמין נפילות בשני הבוטים במקביל.
-    Gemini מקבל audio/ogg ישירות, אז גם אין צורך ב-ffmpeg ובהמרה.
-
-טלגרם שולח OGG/Opus. Gemini בולע את זה כמו שהוא.
+התמלול רץ על Whisper של Groq (עברו מ-Gemini באוגוסט 2026, אחרי
+שגוגל התחילה לחסום גיאוגרפית IP של דאטהסנטרים).
+Whisper מקבל ogg ישירות, תומך בעברית, והמכסה החינמית נדיבה.
+עדיין בלי Whisper מקומי — ל-droplet יש היסטוריית OOM.
 """
 
-import base64
 import logging
 import os
 from typing import Optional
@@ -24,9 +21,9 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API_TOKEN = None  # מוזרק מ-config באתחול
 TELEGRAM_BASE = "https://api.telegram.org"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo")
+GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 # הודעה ארוכה מזה כמעט תמיד שיחה שנשלחה בטעות, לא פנייה לסוכן
 MAX_DURATION_SECONDS = 300
@@ -35,12 +32,8 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 30.0
 TRANSCRIBE_TIMEOUT = 60.0
 
-TRANSCRIBE_PROMPT = (
-    "תמלל את ההקלטה הזו במדויק. ההקלטה בעברית, ועשויה לכלול "
-    "מונחים באנגלית, שמות, שעות ותאריכים. "
-    "החזר אך ורק את התמלול עצמו — בלי הקדמה, בלי הסבר, בלי מרכאות. "
-    "אם לא נשמע דיבור כלל, החזר מחרוזת ריקה."
-)
+# רמז ל-Whisper לאיות נכון של מונחים צפויים
+TRANSCRIBE_PROMPT = "פגישה, תור, יומן, תזכורת, משימה"
 
 
 async def download_voice(file_id: str) -> Optional[tuple[bytes, str]]:
@@ -80,37 +73,30 @@ async def download_voice(file_id: str) -> Optional[tuple[bytes, str]]:
 
 
 async def transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
-    """מחזיר טקסט מתומלל, או None אם התמלול נכשל."""
-    if not GEMINI_API_KEY:
-        logger.error("GEMINI_API_KEY חסר — אין תמלול")
+    """תמלול דרך Whisper של Groq. מחזיר טקסט או None בכישלון."""
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY חסר — אין תמלול")
         return None
 
-    body = {
-        "contents": [{
-            "parts": [
-                {"text": TRANSCRIBE_PROMPT},
-                {"inline_data": {
-                    "mime_type": mime,
-                    "data": base64.b64encode(audio).decode("ascii"),
-                }},
-            ]
-        }],
-        "generationConfig": {"temperature": 0.0},
-    }
+    ext = "ogg" if "ogg" in mime else "mp3"
 
     try:
         async with httpx.AsyncClient(timeout=TRANSCRIBE_TIMEOUT) as client:
             resp = await client.post(
-                f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
-                headers={"x-goog-api-key": GEMINI_API_KEY},
-                json=body,
+                GROQ_TRANSCRIBE_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": (f"voice.{ext}", audio, mime)},
+                data={
+                    "model": WHISPER_MODEL,
+                    "language": "he",
+                    "prompt": TRANSCRIBE_PROMPT,
+                    "temperature": "0",
+                    "response_format": "json",
+                },
             )
             resp.raise_for_status()
-            data = resp.json()
-
-        parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts).strip()
-        return text or None
+            text = (resp.json().get("text") or "").strip()
+            return text or None
 
     except Exception as exc:
         logger.error("תמלול נכשל: %s", exc)

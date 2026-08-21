@@ -108,7 +108,7 @@ async def morning_brief() -> None:
 
     lines = [f"בוקר טוב. {now.strftime('%d/%m')}"]
 
-    forecast = await weather.today()
+    forecast = await weather.today_line()
     if forecast:
         lines.append(forecast)
     lines.append("")
