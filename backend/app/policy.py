@@ -122,6 +122,20 @@ def next_workday_note(now: Optional[datetime] = None) -> Optional[str]:
     return None
 
 
+def hebrew_date(now: Optional[datetime] = None) -> str:
+    """
+    התאריך העברי כמחרוזת ("ח׳ אלול תשפ״ו"), או ריק בכישלון.
+    pyluach מחשב לוקלית — בלי תלות ברשת בחמש בבוקר.
+    """
+    now = (now or datetime.now(TZ)).astimezone(TZ)
+    try:
+        from pyluach import dates
+        return dates.HebrewDate.from_pydate(now.date()).hebrew_date_string()
+    except Exception as exc:
+        logger.warning("תאריך עברי נכשל: %s", exc)
+        return ""
+
+
 # --------------------------------------------------------- דופק
 
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL")

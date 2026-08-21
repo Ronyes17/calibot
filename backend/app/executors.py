@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 TZ = ZoneInfo("Asia/Jerusalem")
 CAL_ID = "primary"
 
+# פלטת הצבעים של יומן גוגל קבועה — 11 צבעים בלבד (colorId).
+# אין חום אמיתי בפלטה; "נסיעה" ממופה לכתום, הקרוב ביותר.
+CATEGORY_COLORS = {
+    "עבודה":   "10",  # ירוק כהה (Basil)
+    "נסיעה":   "6",   # כתום (Tangerine)
+    "אימון":   "11",  # אדום (Tomato)
+    "לימודים": "3",   # סגול (Grape)
+    "אישי":    "7",   # טורקיז (Peacock)
+    "פרוייקט": "9",   # כחול כהה (Blueberry)
+    "טלפוני":  "8",   # אפור (Graphite)
+}
+
 _calendar = None
 _owner_chat_id: Optional[int] = None
 
@@ -214,6 +226,14 @@ async def _create_event(payload: dict) -> str:
     }
     if location:
         body["location"] = location
+
+    category = (payload.get("category") or "").strip()
+    if payload.get("virtual") and not category:
+        category = "טלפוני"
+    color = CATEGORY_COLORS.get(category)
+    if color:
+        body["colorId"] = color
+
     if payload.get("rrule"):
         rule = payload["rrule"]
         body["recurrence"] = [rule if rule.startswith("RRULE") else f"RRULE:{rule}"]

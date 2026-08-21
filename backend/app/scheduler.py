@@ -26,6 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app import backup
+from app import policy
 from app import weather
 from app import db
 from app import weather
@@ -106,7 +107,11 @@ async def morning_brief() -> None:
     events = await _deps.fetch_events(start, end)
     tasks = db.list_open_tasks(_deps.chat_id)
 
-    lines = [f"בוקר טוב. {now.strftime('%d/%m')}"]
+    heb = policy.hebrew_date(now)
+    header = f"בוקר טוב. {now.strftime('%d/%m')}"
+    if heb:
+        header += f" · {heb}"
+    lines = [header]
 
     forecast = await weather.today_line()
     if forecast:
@@ -115,8 +120,24 @@ async def morning_brief() -> None:
 
     if events:
         lines.append("📅 היום:")
-        for ev in sorted(events, key=lambda e: e["start"]):
+        ordered = sorted(events, key=lambda e: e["start"])
+        prev_location = travel.HOME_ADDRESS   # היום מתחיל מהבית
+
+        for ev in ordered:
             loc = f" — {ev['location']}" if ev.get("location") else ""
+
+            # שורת נסיעה לפני כל אירוע פיזי עם מיקום:
+            # מאיפה יוצאים (הבית או האירוע הפיזי הקודם), מתי, וכמה נסיעה.
+            if travel.classify(ev) != "virtual" and (ev.get("location") or "").strip():
+                dest = ev["location"].strip()
+                est = await travel.travel_minutes(prev_location, dest)
+                if est.known and est.minutes > 0:
+                    leave = ev["start"] - timedelta(minutes=est.total_needed)
+                    lines.append(
+                        f"  🚗 {_fmt_time(leave)} יציאה ({est.minutes} דק' נסיעה)"
+                    )
+                prev_location = dest
+
             lines.append(f"  {_fmt_time(ev['start'])}  {ev['summary']}{loc}")
     else:
         lines.append("📅 היומן ריק היום.")

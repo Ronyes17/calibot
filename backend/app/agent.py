@@ -55,6 +55,10 @@ TOOLS = [
             "location": {"type": "string", "description": "כתובת. ריק לאירוע וירטואלי"},
             "virtual": {"type": "boolean",
                         "description": "true לפגישה טלפונית/זום — אין נסיעה"},
+            "category": {"type": "string",
+                         "enum": ["עבודה", "נסיעה", "אימון", "לימודים",
+                                  "אישי", "פרוייקט", "טלפוני"],
+                         "description": "קטגוריית האירוע — קובעת את הצבע ביומן"},
             "rrule": {"type": "string",
                       "description": ("חזרתיות בפורמט RRULE, למשל "
                                       "RRULE:FREQ=WEEKLY;BYDAY=TU לכל יום שלישי. "
@@ -195,6 +199,8 @@ def _summarize(name: str, args: dict) -> str:
             where = " (טלפוני)"
         if args.get("rrule"):
             where += " (חוזר)"
+        if args.get("category") and not args.get("virtual"):
+            where += f" · {args['category']}"
         elif args.get("location"):
             where = f" — {args['location']}"
         repeat = ""

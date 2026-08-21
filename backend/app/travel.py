@@ -28,6 +28,17 @@ ORS_BASE = "https://api.openrouteservice.org"
 # מיקום ברירת מחדל כשלאירוע הקודם אין מיקום רשום
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "גיבורי הקריה 9, קרית אתא")
 
+# עיגון ידני של הבית: "lat,lon" מגוגל מפות. עוקף את הגיאוקודר לגמרי
+# עבור הבית — הכתובת הכי חשובה והכי רגישה לפענוח שגוי.
+_home_env = os.getenv("HOME_COORDS", "")
+HOME_COORDS = None
+if _home_env:
+    try:
+        lat, lon = (float(x) for x in _home_env.split(","))
+        HOME_COORDS = (lon, lat)          # ORS עובד ב-(lon, lat)
+    except ValueError:
+        logger.error("HOME_COORDS לא תקין: %r — מצפה ל'lat,lon'", _home_env)
+
 # חיץ מעבר לזמן הנסיעה עצמו: חניה, כניסה, לא להגיע מזיע
 BUFFER_MINUTES = 15
 
@@ -103,6 +114,10 @@ async def geocode(address: str) -> Optional[tuple[float, float]]:
     if not address or not address.strip():
         return None
 
+    # הבית מעוגן ידנית — לא שואלים את הגיאוקודר עליו בכלל
+    if HOME_COORDS and address.strip() == HOME_ADDRESS.strip():
+        return HOME_COORDS
+
     cached = db.get_geocode(address)
     if cached:
         return cached
@@ -120,6 +135,11 @@ async def geocode(address: str) -> Optional[tuple[float, float]]:
                     "text": address,
                     "boundary.country": "IL",
                     "size": 1,
+                    # הטיה לתוצאות קרובות לבית — "חיפה" צריך להיות
+                    # חיפה שליד קרית אתא, לא עיר אחרת עם שם דומה
+                    **({"focus.point.lon": str(HOME_COORDS[0]),
+                        "focus.point.lat": str(HOME_COORDS[1])}
+                       if HOME_COORDS else {}),
                 },
             )
             resp.raise_for_status()
