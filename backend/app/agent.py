@@ -9,9 +9,11 @@
 שבו המודל כותב ליומן בלי שאישרת.
 """
 
+import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -30,7 +32,7 @@ TZ = ZoneInfo("Asia/Jerusalem")
 # גיאוגרפית מ-IP של דאטהסנטרים (נכון לאוגוסט 2026).
 # החלפת מודל = שינוי LLM_MODEL ב-.env והפעלה מחדש, בלי לגעת בקוד.
 MODEL = os.getenv("LLM_MODEL", "groq/openai/gpt-oss-120b")
-MAX_ROUNDS = 3
+MAX_ROUNDS = 5
 
 WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
@@ -272,25 +274,48 @@ async def _departure_line(args: dict) -> str:
         return ""
 
 
+async def _call_llm(messages: list) -> Optional[dict]:
+    """
+    קריאה למודל עם ניסיון חוזר אחד על מגבלת קצב.
+    המדרגה החינמית של Groq מוגבלת ל-8000 טוקנים לדקה, ותור עם כמה
+    פריטים שולח כמה קריאות ברצף — קל לפגוע בתקרה. Groq מציינת בשגיאה
+    כמה לחכות; אם זה סביר, מחכים ומנסים שוב במקום להיכשל בפני המשתמש.
+    """
+    for attempt in (1, 2):
+        try:
+            return await acompletion(
+                model=MODEL, messages=messages, tools=TOOLS,
+                tool_choice="auto", max_tokens=800,
+            )
+        except Exception as exc:
+            if "RateLimit" in type(exc).__name__ and attempt == 1:
+                match = re.search(r"in ([\d.]+)s", str(exc))
+                wait = min(float(match.group(1)) if match else 20.0, 25.0) + 1
+                logger.warning("מגבלת קצב — ממתין %.0f שניות ומנסה שוב", wait)
+                await asyncio.sleep(wait)
+                continue
+            logger.error("קריאה למודל נכשלה: %s", exc)
+            return None
+    return None
+
+
 async def handle_message(chat_id: int, text: str) -> Optional[str]:
     """
     מחזיר טקסט לשליחה, או None כשכבר נשלחה הודעת אישור עם כפתורים.
     """
     db.add_message(chat_id, "user", text)
 
-    history = db.get_history(chat_id, limit=10)
+    history = db.get_history(chat_id, limit=6)
     messages = [{"role": "system", "content": _system_prompt()}]
     messages += [{"role": m["role"], "content": m["content"]} for m in history]
 
+    proposed_any = False
+
     for _ in range(MAX_ROUNDS):
-        try:
-            response = await acompletion(
-                model=MODEL, messages=messages, tools=TOOLS,
-                tool_choice="auto", max_tokens=800,
-            )
-        except Exception as exc:
-            logger.error("קריאה למודל נכשלה: %s", exc)
-            return "לא הצלחתי לעבד את זה כרגע. תנסה שוב?"
+        response = await _call_llm(messages)
+        if response is None:
+            return ("יש עומס רגעי על המודל. חכה חצי דקה ותנסה שוב — "
+                    "שום דבר לא אבד.")
 
         choice = response["choices"][0]["message"]
         tool_calls = choice.get("tool_calls") or []
@@ -299,10 +324,11 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
             reply = (choice.get("content") or "").strip()
             if reply:
                 db.add_message(chat_id, "assistant", reply)
-            return reply or "לא הבנתי. תוכל לנסח אחרת?"
+                return reply
+            # אין טקסט: אם כבר נשלחו הצעות — סיימנו, הכפתורים אצל המשתמש
+            return None if proposed_any else "לא הבנתי. תוכל לנסח אחרת?"
 
         messages.append(choice)
-        deferred = False
 
         for call in tool_calls:
             name = call["function"]["name"]
@@ -325,7 +351,9 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 )
                 return None
 
-            # --- כלי כתיבה: לא מבצעים, מציעים ---
+            # --- כלי כתיבה: מציעים, ו*ממשיכים* —
+            # חיוני כשהמודל שולח פריטים בזה אחר זה ולא במקביל.
+            # בלי ההמשך, "תקבע X וגם Y" היה נעצר אחרי X.
             if name in WRITE_TOOLS:
                 conflicts = []
                 summary = _summarize(name, args)
@@ -336,7 +364,16 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                     chat_id=chat_id, action_type=name, payload=args,
                     summary=summary, conflicts=conflicts,
                 )
-                deferred = True
+                proposed_any = True
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id", name),
+                    "name": name,
+                    "content": ("נשלחה למשתמש הודעת אישור עם כפתורים. "
+                                "אל תשאל אותו שוב על הפריט הזה. אם נשארו "
+                                "פריטים נוספים בבקשה — טפל בהם עכשיו. "
+                                "אם לא — סיים בלי טקסט."),
+                })
                 continue
 
             # --- כלי קריאה: מבצעים ומחזירים למודל ---
@@ -357,7 +394,6 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-        if deferred:
-            return None   # הודעת האישור כבר נשלחה עם הכפתורים
-
+    if proposed_any:
+        return None
     return "הסתבכתי עם הבקשה הזו. תוכל לפרק אותה לשני חלקים?"

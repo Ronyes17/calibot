@@ -52,6 +52,20 @@ VIRTUAL_HINTS = (
 )
 
 
+# מילים שפירושן "הבית" — אירוע ביתי לא מצריך נסיעה מהבית
+HOME_WORDS = {"בית", "בבית", "הבית", "בית שלי", "אצלי", "אצלי בבית", "home"}
+
+
+def is_home(location: Optional[str]) -> bool:
+    """האם המיקום הוא הבית — לפי מילת מפתח או הכתובת עצמה."""
+    if not location:
+        return False
+    text = location.strip().rstrip(".")
+    return (text in HOME_WORDS
+            or text == HOME_ADDRESS.strip()
+            or text.replace(" ,", ",") == HOME_ADDRESS.strip())
+
+
 def classify(event: dict) -> str:
     """
     'virtual' | 'physical' | 'unknown'
@@ -114,9 +128,14 @@ async def geocode(address: str) -> Optional[tuple[float, float]]:
     if not address or not address.strip():
         return None
 
-    # הבית מעוגן ידנית — לא שואלים את הגיאוקודר עליו בכלל
-    if HOME_COORDS and address.strip() == HOME_ADDRESS.strip():
-        return HOME_COORDS
+    # הבית — על כל צורותיו ("בבית", "אצלי", הכתובת המלאה) — מעוגן
+    # ידנית; לא שואלים את הגיאוקודר עליו בכלל. בלי זה, "בבית" נשלח
+    # לגיאוקודר ופוענח למקום אקראי, וזה מייצר זמני נסיעה הזויים
+    # לאירועים ביתיים.
+    if is_home(address):
+        if HOME_COORDS:
+            return HOME_COORDS
+        address = HOME_ADDRESS
 
     cached = db.get_geocode(address)
     if cached:
@@ -160,6 +179,10 @@ async def geocode(address: str) -> Optional[tuple[float, float]]:
 
 
 async def travel_minutes(origin: str, destination: str) -> TravelEstimate:
+    # שני הצדדים בבית — אין נסיעה. נבדק לפני מטמון ולפני רשת.
+    if is_home(origin) and is_home(destination):
+        return TravelEstimate(minutes=0, from_address=origin,
+                              to_address=destination, cached=True)
     """זמן נסיעה ברכב בדקות. מחזיר minutes=None כשלא ניתן לחשב."""
     if not origin or not destination:
         return TravelEstimate(None, origin or "", destination or "")
@@ -306,6 +329,10 @@ async def departure_hint(new_start, new_location: Optional[str],
     מחזיר (שעת_יציאה, מוצא, דקות_נסיעה) או (None, None, None).
     """
     if new_virtual or not new_location or not new_location.strip():
+        return None, None, None
+
+    # אירוע בבית: אתה כבר שם. אין "צא ב-".
+    if is_home(new_location):
         return None, None, None
 
     ordered = sorted(same_day_events, key=lambda e: e["start"])
