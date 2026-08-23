@@ -383,7 +383,7 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
     messages = [{"role": "system", "content": _system_prompt(chat_id)}]
     messages += [{"role": m["role"], "content": m["content"]} for m in history]
 
-    proposed_any = False
+    proposals: list[dict] = []   # נאספים במהלך התור, נשלחים כמקשה אחת בסוף
 
     for _ in range(MAX_ROUNDS):
         response = await _call_llm(messages)
@@ -396,11 +396,14 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
 
         if not tool_calls:
             reply = (choice.get("content") or "").strip()
+            if proposals:
+                await confirm.propose_batch(chat_id, proposals)
+                # טקסט חופשי מהמודל מיותר לצד הודעת האישור
+                return None
             if reply:
                 db.add_message(chat_id, "assistant", reply)
                 return reply
-            # אין טקסט: אם כבר נשלחו הצעות — סיימנו, הכפתורים אצל המשתמש
-            return None if proposed_any else "לא הבנתי. תוכל לנסח אחרת?"
+            return "לא הבנתי. תוכל לנסח אחרת?"
 
         messages.append(choice)
 
@@ -434,19 +437,17 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 if name == "create_event":
                     conflicts = await _conflicts_for(args)
                     summary += await _departure_line(args)
-                await confirm.propose(
-                    chat_id=chat_id, action_type=name, payload=args,
-                    summary=summary, conflicts=conflicts,
-                )
-                proposed_any = True
+                proposals.append({
+                    "action_type": name, "payload": args,
+                    "summary": summary, "conflicts": conflicts,
+                })
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", name),
                     "name": name,
-                    "content": ("נשלחה למשתמש הודעת אישור עם כפתורים. "
-                                "אל תשאל אותו שוב על הפריט הזה. אם נשארו "
-                                "פריטים נוספים בבקשה — טפל בהם עכשיו. "
-                                "אם לא — סיים בלי טקסט."),
+                    "content": ("הפריט נוסף לרשימת האישור. אל תשאל שוב "
+                                "עליו. אם נשארו פריטים נוספים בבקשה — "
+                                "טפל בהם עכשיו. אם לא — סיים בלי טקסט."),
                 })
                 continue
 
@@ -468,6 +469,7 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-    if proposed_any:
+    if proposals:
+        await confirm.propose_batch(chat_id, proposals)
         return None
     return "הסתבכתי עם הבקשה הזו. תוכל לפרק אותה לשני חלקים?"

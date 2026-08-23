@@ -29,6 +29,20 @@ def _service():
                  cache_discovery=False)
 
 
+# סימנים מובהקים של דיוור שיווקי — בעברית ובאנגלית.
+# קבלות ואישורי רכישה נשארים; ניוזלטרים ומבצעים לא.
+PROMO_MARKERS = (
+    "פרסומת", "מבצע", "הנחה", "דיוור", "ניוזלטר", "הטבה", "קופון",
+    "unsubscribe", "newsletter", "promotion", "sale", "% off", "deal",
+    "מציאות", "בלעדי לחברי",
+)
+
+
+def _looks_promotional(email: dict) -> bool:
+    text = f"{email['from']} {email['subject']} {email['snippet']}".lower()
+    return any(marker in text for marker in PROMO_MARKERS)
+
+
 def _fetch_sync(query: str, limit: int) -> list[dict]:
     service = _service()
     if service is None:
@@ -61,10 +75,14 @@ def _fetch_sync(query: str, limit: int) -> list[dict]:
 async def unread_recent(limit: int = 5) -> list[dict]:
     """מיילים שלא נקראו מהיממה האחרונה, מהתיבה הראשית."""
     try:
-        return await asyncio.to_thread(
-            _fetch_sync, "in:inbox is:unread newer_than:1d category:primary",
-            limit,
+        emails = await asyncio.to_thread(
+            _fetch_sync,
+            # שלילת קטגוריות השיווק במקור — עובד גם כשאין טאבים בתיבה
+            "in:inbox is:unread newer_than:1d "
+            "-category:promotions -category:social",
+            limit * 2,     # מביאים מרווח, כי הסינון המקומי עוד יצמצם
         )
+        return [m for m in emails if not _looks_promotional(m)][:limit]
     except Exception as exc:
         logger.warning("קריאת מייל נכשלה: %s", exc)
         return []

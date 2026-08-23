@@ -109,6 +109,51 @@ async def propose(
     return action_id
 
 
+async def propose_batch(chat_id: int, items: list[dict]) -> None:
+    """
+    כמה פריטים מהודעה אחת -> הודעת אישור אחת עם רשימה ממוספרת
+    וכפתורי "אשר הכל" / "בטל הכל". פריט בודד עובר ל-propose הרגיל.
+
+    כל פריט: {"action_type", "payload", "summary", "conflicts"}.
+    הפריטים נשמרים כרגיל ב-pending_actions (שרידות ל-restart);
+    הכפתור נושא את טווח המזהים.
+    """
+    if not items:
+        return
+    if len(items) == 1:
+        it = items[0]
+        await propose(chat_id, it["action_type"], it["payload"],
+                      it["summary"], it.get("conflicts"))
+        return
+
+    ids = []
+    lines = []
+    for i, it in enumerate(items, start=1):
+        action_id = db.create_pending(
+            chat_id, it["action_type"], it["payload"], it["summary"])
+        ids.append(action_id)
+        line = f"{i}. {it['summary'].rstrip('?')}"
+        for c in (it.get("conflicts") or []):
+            line += f"\n   ⚠️ {c.message}"
+        lines.append(line)
+
+    id_range = f"{min(ids)}-{max(ids)}"
+    await _tg("sendMessage", {
+        "chat_id": chat_id,
+        "text": f"מצאתי {len(items)} פריטים:\n\n" + "\n".join(lines)
+                + "\n\nלאשר את כולם?",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "✅ אשר הכל", "callback_data": f"okall:{id_range}"},
+            {"text": "❌ בטל הכל", "callback_data": f"noall:{id_range}"},
+        ]]},
+    })
+
+
+def _batch_ids(spec: str) -> list[int]:
+    lo, hi = (int(x) for x in spec.split("-"))
+    return list(range(lo, hi + 1))
+
+
 def _shift_payload(payload: dict, minutes: int) -> dict:
     """מזיז start/end (ISO) קדימה. שאר השדות לא נוגעים."""
     shifted = dict(payload)
@@ -142,6 +187,32 @@ async def handle_callback(callback: dict) -> None:
 
     parts = data.split(":")
     verb = parts[0]
+
+    # --- כפתורי קבוצה: אשר/בטל את כל הפריטים של ההודעה ---
+    if verb in ("okall", "noall"):
+        await _tg("answerCallbackQuery", {"callback_query_id": callback_id})
+        results = []
+        for aid in _batch_ids(parts[1]):
+            pending = db.get_pending_by_id(aid)
+            if pending is None:
+                continue
+            if verb == "okall":
+                db.resolve_pending(aid, "confirmed")
+                results.append(await _execute(pending))
+            else:
+                db.resolve_pending(aid, "rejected")
+        summary_text = ("\n".join(results) if results
+                        else ("בוטל." if verb == "noall" else "לא נשאר מה לבצע."))
+        if verb == "noall" and not results:
+            summary_text = "הכל בוטל."
+        await _tg("editMessageReplyMarkup", {
+            "chat_id": chat_id, "message_id": message_id,
+            "reply_markup": {"inline_keyboard": []},
+        })
+        await _tg("sendMessage", {"chat_id": chat_id, "text": summary_text})
+        db.add_message(chat_id, "assistant", summary_text)
+        return
+
     action_id = int(parts[1]) if len(parts) > 1 else None
 
     # מאתרים לפי המזהה שבכפתור, לא לפי "ההצעה הפתוחה" —
@@ -201,10 +272,18 @@ async def try_text_confirmation(chat_id: int, text: str) -> bool:
         return False
 
     if len(open_actions) > 1:
-        await _tg("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"יש {len(open_actions)} הצעות פתוחות — תאשר כל אחת בכפתור שלה.",
-        })
+        # אחרי הודעת אישור מרוכזת, "כן" מתייחס לכל הרשימה —
+        # בדיוק כמו הכפתור "אשר הכל".
+        results = []
+        for pending in open_actions:
+            if word in YES_WORDS:
+                db.resolve_pending(pending["id"], "confirmed")
+                results.append(await _execute(pending))
+            else:
+                db.resolve_pending(pending["id"], "rejected")
+        text_out = "\n".join(results) if results else "הכל בוטל."
+        await _tg("sendMessage", {"chat_id": chat_id, "text": text_out})
+        db.add_message(chat_id, "assistant", text_out)
         return True
 
     pending = open_actions[0]

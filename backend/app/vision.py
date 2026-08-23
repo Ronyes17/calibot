@@ -1,12 +1,24 @@
 """
-תמונה -> אירוע.
+תמונה -> אירוע, דרך Vertex AI.
 
-צילום של זימון תור, כרטיס, הזמנה — Gemini Vision מחלץ ממנו טקסט
-מובנה, והטקסט נכנס לאותו pipeline כמו הודעה כתובה. אותו דפוס בדיוק
-כמו voice.py: להמיר את המדיה לטקסט מוקדם ככל האפשר, ומשם הכל אחיד.
+הגלגול השני של המודול: הגרסה הראשונה דיברה עם AI Studio
+(generativelanguage.googleapis.com), שחוסם גיאוגרפית IP של
+דאטהסנטרים. Vertex AI הוא המסלול שגוגל מייעדת לשרתים — אותם
+מודלי Gemini, אימות ב-Service Account במקום מפתח API, ובחירת
+region מפורשת. אין תלות במיקום ה-IP.
+
+עיקרון הצינור לא השתנה: מדיה -> טקסט מוקדם ככל האפשר, ומשם
+הכל זורם כמו הודעה כתובה.
+
+env:
+    VERTEX_SA_FILE   נתיב ל-JSON של חשבון השירות (nikol-vertex)
+    VERTEX_REGION    ברירת מחדל europe-west1
+    VERTEX_MODEL     ברירת מחדל gemini-2.5-flash
 """
 
+import asyncio
 import base64
+import json
 import logging
 import os
 from typing import Optional
@@ -15,12 +27,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API_TOKEN = None  # מוזרק מ-config באתחול
+TELEGRAM_API_TOKEN = None  # מוזרק מ-main באתחול
 TELEGRAM_BASE = "https://api.telegram.org"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+SA_FILE = os.getenv("VERTEX_SA_FILE", "")
+REGION = os.getenv("VERTEX_REGION", "europe-west1")
+MODEL = os.getenv("VERTEX_MODEL", "gemini-2.5-flash")
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 
@@ -33,6 +45,34 @@ EXTRACT_PROMPT = (
     "אם אין בתמונה שום פרט של אירוע, החזר בדיוק: אין אירוע\n"
     "החזר רק את הפרטים, בלי הקדמות."
 )
+
+_credentials = None
+_project_id: Optional[str] = None
+
+
+def _load_credentials():
+    """טעינת חשבון השירות פעם אחת; רענון טוקן לפי הצורך."""
+    global _credentials, _project_id
+    if _credentials is None:
+        if not SA_FILE or not os.path.exists(SA_FILE):
+            return None
+        from google.oauth2.service_account import Credentials
+        _credentials = Credentials.from_service_account_file(
+            SA_FILE, scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        with open(SA_FILE, encoding="utf-8") as f:
+            _project_id = json.load(f).get("project_id")
+    return _credentials
+
+
+def _fresh_token_sync() -> Optional[str]:
+    creds = _load_credentials()
+    if creds is None:
+        return None
+    if not creds.valid:
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+        creds.refresh(GoogleAuthRequest())
+    return creds.token
 
 
 async def _download_photo(file_id: str) -> Optional[bytes]:
@@ -67,25 +107,30 @@ async def photo_to_text(message: dict) -> tuple[Optional[str], Optional[str]]:
     if not photos:
         return None, None
 
-    # טלגרם שולח כמה רזולוציות; האחרונה היא הגדולה ביותר
-    file_id = photos[-1]["file_id"]
+    file_id = photos[-1]["file_id"]   # הרזולוציה הגדולה ביותר
 
     image = await _download_photo(file_id)
     if image is None:
         return None, "לא הצלחתי להוריד את התמונה. תנסה שוב?"
 
-    if not GEMINI_API_KEY:
-        return None, "עיבוד תמונות לא מוגדר."
+    token = await asyncio.to_thread(_fresh_token_sync)
+    if token is None:
+        return None, "עיבוד תמונות לא מוגדר (חסר חשבון שירות של Vertex)."
+
+    url = (f"https://{REGION}-aiplatform.googleapis.com/v1/projects/"
+           f"{_project_id}/locations/{REGION}/publishers/google/models/"
+           f"{MODEL}:generateContent")
 
     body = {
         "contents": [{
+            "role": "user",
             "parts": [
                 {"text": EXTRACT_PROMPT},
                 {"inline_data": {
                     "mime_type": "image/jpeg",
                     "data": base64.b64encode(image).decode("ascii"),
                 }},
-            ]
+            ],
         }],
         "generationConfig": {"temperature": 0.0},
     }
@@ -93,8 +138,8 @@ async def photo_to_text(message: dict) -> tuple[Optional[str], Optional[str]]:
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
-                f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
-                headers={"x-goog-api-key": GEMINI_API_KEY},
+                url,
+                headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )
             resp.raise_for_status()

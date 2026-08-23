@@ -22,3 +22,7 @@ token.pickle
 *.pickle
 oauth_state.txt
 backups/
+
+nikol-bot-*.json
+vertex-sa.json
+*-sa.json
