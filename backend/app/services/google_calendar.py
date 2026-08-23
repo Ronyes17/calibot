@@ -22,7 +22,13 @@ class GoogleCalendarService:
         self.credentials = None
         self.token_path = 'token.pickle'
         self.service = None
-        self.redirect_uri = f"http://{API_HOST}:{API_PORT}{OAUTH_REDIRECT_PATH}"
+        # בשרת, החזרה מגוגל חייבת להגיע לכתובת הציבורית — localhost
+        # של השרת אינו נגיש מהדפדפן של רון. מקומית נשאר localhost.
+        public = os.getenv("PUBLIC_URL", "").rstrip("/")
+        self.redirect_uri = (
+            f"{public}{OAUTH_REDIRECT_PATH}" if public
+            else f"http://{API_HOST}:{API_PORT}{OAUTH_REDIRECT_PATH}"
+        )
     
     def get_auth_url(self):
         """Generate and return the Google OAuth authorization URL."""

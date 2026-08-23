@@ -16,6 +16,7 @@ from app import backup
 from app import confirm
 from app import db
 from app import executors
+from app import gmail_reader
 from app import policy
 from app import scheduler
 from app import vision
@@ -57,6 +58,9 @@ async def lifespan(app: FastAPI):
 
     # --- 3. מבצעים + כלי קריאה ---
     executors.set_calendar_service(calendar_service, OWNER_CHAT_ID)
+    gmail_reader.init(calendar_service)
+    executors.set_prompt_job_registrar(scheduler.register_prompt_job)
+    executors.set_prompt_job_remover(scheduler.remove_prompt_job)
 
     # --- 4. וובהוק ---
     if not PUBLIC_URL:

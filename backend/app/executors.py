@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from app import agent
 from app import db
+from app import websearch
 from app.confirm import register_executor
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,22 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     agent.set_read_executor("query_events", fetch_events)
     agent.set_read_executor("list_tasks", list_tasks)
     agent.set_read_executor("search_events", search_events)
+    agent.set_read_executor("remember_preference", remember_preference)
+    agent.set_read_executor("web_search", web_search)
+    agent.set_read_executor("search_knowledge", search_knowledge)
+    agent.set_read_executor("list_scheduled", list_scheduled)
+    agent.set_read_executor("check_email", check_email)
+    agent.set_read_executor("workout_stats", workout_stats)
+    agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
     agent.set_read_executor("search_events", search_events)
+    agent.set_read_executor("remember_preference", remember_preference)
+    agent.set_read_executor("web_search", web_search)
+    agent.set_read_executor("search_knowledge", search_knowledge)
+    agent.set_read_executor("list_scheduled", list_scheduled)
+    agent.set_read_executor("check_email", check_email)
+    agent.set_read_executor("workout_stats", workout_stats)
+    agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
 
 
@@ -115,6 +130,7 @@ async def fetch_events(start: datetime, end: datetime) -> list[dict]:
                 "end": _parse(ev.get("end", ev["start"])),
                 "location": ev.get("location", "") or "",
                 "description": ev.get("description", "") or "",
+                "colorId": ev.get("colorId", ""),
             })
         except Exception as exc:
             logger.warning("דילוג על אירוע שלא נפרסר: %s", exc)
@@ -386,4 +402,102 @@ async def meeting_stats(start, end) -> dict:
         "hours": round(total_minutes / 60, 1),
         "busiest": max(events, key=lambda e: e["end"] - e["start"])["summary"]
         if events else None,
+    }
+
+
+async def remember_preference(key: str, value: str) -> str:
+    db.set_preference(_owner_chat_id, key, value)
+    return f"נשמר: {key} = {value}"
+
+
+async def forget_preference(key: str) -> str:
+    ok = db.delete_preference(_owner_chat_id, key)
+    return "נמחק." if ok else "לא מצאתי העדפה כזו."
+
+
+async def web_search(query: str) -> list[dict]:
+    return await websearch.search(query)
+
+
+async def search_knowledge(query: str) -> list[dict]:
+    results = db.search_documents(query)
+    return results or [{"title": "", "snippet": "לא נמצא כלום בבסיס הידע."}]
+
+
+async def list_scheduled() -> list[dict]:
+    return db.list_scheduled_prompts(_owner_chat_id)
+
+
+# רישום ג'וב חי נעשה דרך scheduler — מוזרק באתחול כדי למנוע ייבוא מעגלי
+_register_prompt_job = None
+
+def set_prompt_job_registrar(fn) -> None:
+    global _register_prompt_job
+    _register_prompt_job = fn
+
+
+@register_executor("schedule_prompt")
+async def _schedule_prompt(payload: dict) -> str:
+    sid = db.add_scheduled_prompt(
+        _owner_chat_id, payload["day_of_week"],
+        int(payload["hour"]), int(payload["minute"]), payload["prompt"],
+    )
+    if _register_prompt_job:
+        row = {"id": sid, "chat_id": _owner_chat_id, **payload}
+        _register_prompt_job(row)
+    return f"תוזמן (#{sid}). לביטול: 'תבטלי את התזמון {sid}'."
+
+
+@register_executor("cancel_scheduled")
+async def _cancel_scheduled(payload: dict) -> str:
+    sid = int(payload["schedule_id"])
+    ok = db.deactivate_scheduled_prompt(sid)
+    if ok and _remove_prompt_job:
+        _remove_prompt_job(sid)
+    return "בוטל." if ok else "לא מצאתי תזמון פעיל כזה."
+
+
+_remove_prompt_job = None
+
+def set_prompt_job_remover(fn) -> None:
+    global _remove_prompt_job
+    _remove_prompt_job = fn
+
+
+async def check_email() -> list[dict]:
+    from app import gmail_reader
+    emails = await gmail_reader.unread_recent(limit=5)
+    return emails or [{"info": "אין מיילים חדשים ביממה האחרונה."}]
+
+
+# --- אימונים: זיהוי לפי הצבע שאנחנו עצמנו קובעים, או מילות מפתח ---
+
+WORKOUT_COLOR = CATEGORY_COLORS["אימון"]
+WORKOUT_WORDS = ("אימון", "כושר", "ריצה", "חדר כושר", "שחייה",
+                 "אופניים", "כדורגל", "כדורסל", "יוגה", "הליכה")
+
+
+def _is_workout(ev: dict) -> bool:
+    if ev.get("colorId") == WORKOUT_COLOR:
+        return True
+    title = (ev.get("summary") or "")
+    return any(w in title for w in WORKOUT_WORDS)
+
+
+async def workout_stats(days: int = 7) -> dict:
+    """כמה אימונים, סה"כ זמן, ומתי האחרון — עבור המאמן."""
+    from datetime import timedelta
+    now = datetime.now(TZ)
+    events = await fetch_events(now - timedelta(days=max(1, days)), now)
+    workouts = [e for e in events if _is_workout(e)]
+
+    total_min = sum(
+        int((e["end"] - e["start"]).total_seconds() // 60) for e in workouts
+    )
+    last = max((e["end"] for e in workouts), default=None)
+    return {
+        "count": len(workouts),
+        "total_hours": round(total_min / 60, 1),
+        "days_since_last": (now - last).days if last else None,
+        "titles": [e["summary"] for e in workouts],
     }

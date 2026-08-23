@@ -42,3 +42,28 @@ class TelegramBotService:
         
         
 
+
+
+async def send_telegram_voice(chat_id: int, audio: bytes, kind: str = "voice",
+                              caption: str = None):
+    """
+    שליחת שמע: kind='voice' (ogg/opus, מוצג כהודעה קולית) או
+    'audio' (mp3, מוצג כנגן). ה-caption מצרף את הטקסט המלא —
+    כך אפשר גם להאזין וגם לקרוא.
+    """
+    method = "sendVoice" if kind == "voice" else "sendAudio"
+    field = "voice" if kind == "voice" else "audio"
+    ext = "ogg" if kind == "voice" else "mp3"
+
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption[:1024]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{TELEGRAM_API_BASE}/{method}",
+            data=data,
+            files={field: (f"nikol.{ext}", audio,
+                           "audio/ogg" if kind == "voice" else "audio/mpeg")},
+        )
+        return response.json()

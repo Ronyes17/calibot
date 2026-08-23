@@ -26,6 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app import backup
+from app import gmail_reader
 from app import policy
 from app import weather
 from app import db
@@ -142,6 +143,24 @@ async def morning_brief() -> None:
     else:
         lines.append("📅 היומן ריק היום.")
 
+    # מאמן הכושר: שקט כשאתה בסדר, מציק בעדינות כשמצטבר פער
+    try:
+        from app import executors as _ex
+        stats = await _ex.workout_stats(days=7)
+        gap = stats.get("days_since_last")
+        if gap is not None and gap >= 4:
+            lines.append(f"\n💪 עברו {gap} ימים מהאימון האחרון — לשבץ אחד השבוע?")
+        elif stats.get("count", 0) == 0:
+            lines.append("\n💪 לא נרשמו אימונים השבוע — מתחילים היום?")
+    except Exception as exc:
+        logger.warning("סטטיסטיקת אימונים נכשלה: %s", exc)
+
+    emails = await gmail_reader.unread_recent(limit=5)
+    if emails:
+        lines.append(f"\n📧 מחכים בתיבה ({len(emails)}):")
+        for m in emails:
+            lines.append(f"  • {m['from']} — {m['subject']}")
+
     warnings = await _tight_transitions(events)
     if warnings:
         lines.append("")
@@ -161,6 +180,26 @@ async def morning_brief() -> None:
         today_str = now.strftime("%Y-%m-%d")
         due_today = [t for t in tasks if t.get("soft_due") == today_str]
         rest = [t for t in tasks if t.get("soft_due") != today_str]
+
+        # דדליינים מתקרבים: 1-3 ימים קדימה, עם ספירה לאחור.
+        # מספיק רחוק כדי להספיק להתכונן, מספיק קרוב כדי לא להפוך לרעש.
+        def _days_until(t):
+            try:
+                due = datetime.strptime(t["soft_due"], "%Y-%m-%d").date()
+                return (due - now.date()).days
+            except (TypeError, ValueError):
+                return None
+
+        approaching = sorted(
+            [(d, t) for t in rest if (d := _days_until(t)) and 1 <= d <= 3],
+            key=lambda pair: pair[0],
+        )
+        if approaching:
+            lines.append("\n⏳ מתקרב:")
+            for days, t in approaching:
+                when = "מחר" if days == 1 else f"בעוד {days} ימים"
+                lines.append(f"  • {t['title']} — {when}")
+            rest = [t for t in rest if all(t is not p[1] for p in approaching)]
 
         if due_today:
             lines.append("\n📌 להיום:")
@@ -195,6 +234,24 @@ async def evening_review() -> None:
     else:
         lines.append("  היומן פנוי.")
 
+    # מאמן הכושר: שקט כשאתה בסדר, מציק בעדינות כשמצטבר פער
+    try:
+        from app import executors as _ex
+        stats = await _ex.workout_stats(days=7)
+        gap = stats.get("days_since_last")
+        if gap is not None and gap >= 4:
+            lines.append(f"\n💪 עברו {gap} ימים מהאימון האחרון — לשבץ אחד השבוע?")
+        elif stats.get("count", 0) == 0:
+            lines.append("\n💪 לא נרשמו אימונים השבוע — מתחילים היום?")
+    except Exception as exc:
+        logger.warning("סטטיסטיקת אימונים נכשלה: %s", exc)
+
+    emails = await gmail_reader.unread_recent(limit=5)
+    if emails:
+        lines.append(f"\n📧 מחכים בתיבה ({len(emails)}):")
+        for m in emails:
+            lines.append(f"  • {m['from']} — {m['subject']}")
+
     warnings = await _tight_transitions(events)
     if warnings:
         lines.append("")
@@ -227,6 +284,48 @@ async def stuck_task_nudge() -> None:
 
 # ---------------------------------------------------------- אתחול
 
+async def run_scheduled_prompt(chat_id: int, prompt: str) -> None:
+    """
+    הרצת הוראה מתוזמנת: ההוראה נכנסת לסוכן כאילו רון כתב אותה עכשיו,
+    והתשובה נשלחת אליו. כך "תשלחי לי סיכום הוצאות" יכול להשתמש בכל
+    הכלים — יומן, משימות, חיפוש — בלי קוד ייעודי לכל תרחיש.
+    """
+    from app import agent, policy
+    if policy.in_quiet_hours():
+        logger.info("הוראה מתוזמנת דולגה — שעות שקט")
+        return
+    try:
+        reply = await agent.handle_message(chat_id, prompt)
+        if reply and _deps:
+            await _deps.send(chat_id, reply)
+    except Exception as exc:
+        logger.error("הוראה מתוזמנת נכשלה: %s", exc)
+
+
+def register_prompt_job(row: dict) -> None:
+    """רישום ג'וב חי עבור הוראה — בעלייה ובהוספה תוך כדי ריצה."""
+    if _scheduler is None:
+        return
+    day = row["day_of_week"]
+    trigger = {"hour": int(row["hour"]), "minute": int(row["minute"])}
+    if day and day != "*":
+        trigger["day_of_week"] = day
+    _scheduler.add_job(
+        run_scheduled_prompt, "cron", id=f"prompt_{row['id']}",
+        args=[row["chat_id"], row["prompt"]],
+        replace_existing=True, **trigger,
+    )
+
+
+def remove_prompt_job(schedule_id: int) -> None:
+    if _scheduler is None:
+        return
+    try:
+        _scheduler.remove_job(f"prompt_{schedule_id}")
+    except Exception:
+        pass
+
+
 def start_scheduler(deps: Deps) -> AsyncIOScheduler:
     """נקרא מתוך lifespan ב-main.py, ליד הפעלת הבוט."""
     global _deps, _scheduler
@@ -258,6 +357,10 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
 
     scheduler.start()
     _scheduler = scheduler
+
+    # הוראות מתוזמנות ששמורות במסד — נרשמות מחדש בכל עלייה
+    for row in db.list_scheduled_prompts(deps.chat_id):
+        register_prompt_job(row)
     logger.info("מתזמן הופעל — %s ג'ובים", len(scheduler.get_jobs()))
     return scheduler
 

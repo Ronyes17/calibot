@@ -80,6 +80,25 @@ CREATE INDEX IF NOT EXISTS idx_activity ON activity_log(chat_id, log_date DESC);
 -- מטמון זמני נסיעה. בלעדיו כל בדיקת התנגשות היא קריאת API בתשלום.
 -- החיים שלך מכילים כ-20 מקומות חוזרים, אז אחרי כמה שבועות רוב הבדיקות
 -- ייענו מהמטמון בלי לצאת החוצה בכלל.
+CREATE TABLE IF NOT EXISTS scheduled_prompts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    day_of_week TEXT NOT NULL,      -- sun/mon/... או * לכל יום
+    hour        INTEGER NOT NULL,
+    minute      INTEGER NOT NULL,
+    prompt      TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS preferences (
+    chat_id     INTEGER NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (chat_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS travel_cache (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     origin         TEXT    NOT NULL,
@@ -120,6 +139,10 @@ def init_db() -> None:
     """נקרא פעם אחת מתוך lifespan ב-main.py."""
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge USING fts5("
+            "title, content, added_at UNINDEXED)"
+        )
 
         # מיגרציה עדינה: בסיס נתונים שנוצר לפני שהעמודות האלה קיימות
         existing = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
@@ -444,3 +467,105 @@ def get_action_by_id(action_id: int) -> Optional[dict]:
             action["status"] = "expired"
         action["payload"] = json.loads(action["payload"])
         return action
+
+
+# ------------------------------------------------ העדפות קבועות
+
+def set_preference(chat_id: int, key: str, value: str) -> None:
+    """שמירת העדפה קבועה — "אימון תמיד שעה וחצי" וכדומה."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO preferences (chat_id, key, value, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chat_id, key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (chat_id, key.strip(), value.strip(), _now()),
+        )
+
+
+def delete_preference(chat_id: int, key: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM preferences WHERE chat_id = ? AND key = ?",
+            (chat_id, key.strip()),
+        )
+        return cur.rowcount > 0
+
+
+def get_preferences(chat_id: int) -> dict[str, str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM preferences WHERE chat_id = ? ORDER BY key",
+            (chat_id,),
+        ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+# ------------------------------------------------ בסיס ידע (FTS5)
+
+def add_document(title: str, content: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO knowledge (title, content, added_at) VALUES (?, ?, ?)",
+            (title.strip(), content, _now()),
+        )
+
+
+def search_documents(query: str, limit: int = 3) -> list[dict]:
+    """חיפוש FTS5. מחזיר קטעים רלוונטיים עם שם המסמך."""
+    # OR בין המילים: שאלה טבעית ("מתי נגמר הביטוח") מכילה מילים שלא
+    # מופיעות במסמך, וברירת המחדל של FTS5 היא AND — שמחזיר כלום.
+    words = [w for w in query.replace('"', " ").split() if len(w) > 1]
+    if not words:
+        return []
+    sanitized = " OR ".join(words)
+    with get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT title, snippet(knowledge, 1, '', '', '...', 40) AS part "
+                "FROM knowledge WHERE knowledge MATCH ? ORDER BY rank LIMIT ?",
+                (sanitized, limit),
+            ).fetchall()
+        except Exception:
+            return []
+        return [{"title": r["title"], "snippet": r["part"]} for r in rows]
+
+
+def list_documents() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT rowid AS id, title, added_at FROM knowledge ORDER BY rowid DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ----------------------------------------- הוראות מתוזמנות
+
+def add_scheduled_prompt(chat_id: int, day_of_week: str, hour: int,
+                         minute: int, prompt: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO scheduled_prompts "
+            "(chat_id, day_of_week, hour, minute, prompt, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, day_of_week, hour, minute, prompt, _now()),
+        )
+        return cur.lastrowid
+
+
+def list_scheduled_prompts(chat_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scheduled_prompts WHERE chat_id = ? AND active = 1 "
+            "ORDER BY id", (chat_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def deactivate_scheduled_prompt(schedule_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE scheduled_prompts SET active = 0 WHERE id = ? AND active = 1",
+            (schedule_id,),
+        )
+        return cur.rowcount > 0

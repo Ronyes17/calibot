@@ -26,7 +26,8 @@ from app import vision
 from app import voice
 from app.api.models import TelegramUpdate
 from app.services.google_calendar import GoogleCalendarService
-from app.services.telegram import send_telegram_message
+from app import tts
+from app.services.telegram import send_telegram_message, send_telegram_voice
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -194,3 +195,55 @@ async def _quick_command(chat_id: int, text: str):
         )
 
     return None
+
+
+MAX_DOC_BYTES = 5 * 1024 * 1024
+
+
+async def _ingest_document(doc: dict) -> tuple[str, str]:
+    """הורדת מסמך מטלגרם, חילוץ טקסט, ושמירה בבסיס הידע."""
+    import httpx
+    from app.config import TELEGRAM_API_TOKEN as TOKEN
+
+    name = doc.get("file_name", "מסמך")
+    if doc.get("file_size", 0) > MAX_DOC_BYTES:
+        return "", f"{name} גדול מדי (מעל 5MB)."
+
+    lowered = name.lower()
+    if not lowered.endswith((".pdf", ".txt", ".md")):
+        return "", "אני יודעת לשמור PDF או קובצי טקסט (txt/md)."
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            meta = await client.get(
+                f"https://api.telegram.org/bot{TOKEN}/getFile",
+                params={"file_id": doc["file_id"]},
+            )
+            path = meta.json()["result"]["file_path"]
+            resp = await client.get(
+                f"https://api.telegram.org/file/bot{TOKEN}/{path}"
+            )
+            resp.raise_for_status()
+            raw = resp.content
+    except Exception as exc:
+        logger.error("הורדת מסמך נכשלה: %s", exc)
+        return "", "לא הצלחתי להוריד את הקובץ."
+
+    if lowered.endswith(".pdf"):
+        try:
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            content = "\n".join((p.extract_text() or "") for p in reader.pages)
+        except Exception as exc:
+            logger.error("חילוץ PDF נכשל: %s", exc)
+            return "", "לא הצלחתי לקרוא את ה-PDF."
+    else:
+        content = raw.decode("utf-8", errors="replace")
+
+    content = content.strip()[:200_000]
+    if not content:
+        return "", "הקובץ ריק או שלא הצלחתי לחלץ ממנו טקסט."
+
+    db.add_document(name, content)
+    return f'נשמר בבסיס הידע: {name}. תוכל לשאול אותי עליו מתי שתרצה.', ""

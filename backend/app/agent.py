@@ -37,11 +37,16 @@ MAX_ROUNDS = 5
 WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
 # כלים שמחזירים מידע ומתבצעים מיד
-READ_TOOLS = {"query_events", "list_tasks", "search_events", "meeting_stats"}
+# העדפות מתבצעות מיד — הן זולות, הפיכות, ולא נוגעות ביומן
+READ_TOOLS = {"query_events", "list_tasks", "search_events", "meeting_stats",
+              "remember_preference", "forget_preference",
+              "web_search", "search_knowledge", "list_scheduled",
+              "check_email", "workout_stats"}
 
 # כלים שמשנים משהו ולכן עוברים דרך אישור
 WRITE_TOOLS = {"create_event", "update_event", "delete_event",
-               "add_task", "complete_task", "log_activity"}
+               "add_task", "complete_task", "log_activity",
+               "schedule_prompt", "cancel_scheduled"}
 
 # מטופל בנפרד: הוא לא פעולה חדשה אלא הצעה מחדש של פעולה קיימת
 RESTORE_TOOL = "restore_last"
@@ -125,22 +130,77 @@ TOOLS = [
         }, "required": ["task_id"]},
     }},
     {"type": "function", "function": {
-        "name": "search_events",
-        "description": ("מחפש אירועים בעבר או בעתיד לפי טקסט חופשי. "
-                        "לשאלות כמו 'מתי נפגשתי עם X לאחרונה'."),
+        "name": "check_email",
+        "description": ("מיילים שלא נקראו מהיממה האחרונה. לשאלות כמו "
+                        "'יש לי מיילים חדשים?' או 'מה מחכה לי בתיבה?'"),
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "workout_stats",
+        "description": ("סטטיסטיקת אימונים: כמה אימונים ומתי היה האחרון. "
+                        "לשאלות על כושר, אימונים, והתקדמות."),
         "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "מילות חיפוש"},
-            "days_back": {"type": "integer",
-                          "description": "כמה ימים אחורה לחפש. ברירת מחדל 180"},
+            "days": {"type": "integer", "description": "כמה ימים אחורה. ברירת מחדל 7"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "web_search",
+        "description": ("חיפוש באינטרנט למידע עדכני — שעות פתיחה, חדשות, "
+                        "מחירים, עובדות שאתה לא בטוח בהן. החזר לרון תשובה "
+                        "עם המקור."),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "שאילתת חיפוש קצרה"},
         }, "required": ["query"]},
     }},
     {"type": "function", "function": {
-        "name": "meeting_stats",
-        "description": ("מסכם כמה זמן בילית בפגישות בתקופה. "
-                        "לשאלות כמו 'כמה זמן ביליתי בפגישות החודש'."),
+        "name": "search_knowledge",
+        "description": ("חיפוש במסמכים שרון שמר אצלך — חוזים, מסמכים, "
+                        "הערות. לשאלות על 'המסמך ש...' או פרטים אישיים "
+                        "ששמורים בבסיס הידע."),
         "parameters": {"type": "object", "properties": {
-            "days": {"type": "integer", "description": "כמה ימים אחורה. ברירת מחדל 30"},
-        }},
+            "query": {"type": "string"},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "schedule_prompt",
+        "description": ("תזמון הוראה קבועה — 'כל יום ראשון ב-8 תשלחי לי X'. "
+                        "ניקול תריץ את ההוראה בזמן שנקבע ותשלח את התוצאה."),
+        "parameters": {"type": "object", "properties": {
+            "prompt": {"type": "string", "description": "מה להריץ, כלשונו"},
+            "day_of_week": {"type": "string",
+                            "description": ("יום בשבוע באנגלית: sun/mon/tue/wed/"
+                                            "thu/fri/sat, או * לכל יום")},
+            "hour": {"type": "integer"}, "minute": {"type": "integer"},
+        }, "required": ["prompt", "day_of_week", "hour", "minute"]},
+    }},
+    {"type": "function", "function": {
+        "name": "cancel_scheduled",
+        "description": "ביטול הוראה מתוזמנת לפי המזהה שלה (מ-list_scheduled).",
+        "parameters": {"type": "object", "properties": {
+            "schedule_id": {"type": "integer"},
+        }, "required": ["schedule_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_scheduled",
+        "description": "רשימת ההוראות המתוזמנות הפעילות.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "remember_preference",
+        "description": ("שמירת העדפה קבועה של רון. כשהוא אומר 'תמיד', "
+                        "'מעכשיו', 'כל פעם' — למשל 'אימון זה תמיד שעה וחצי'. "
+                        "מתבצע מיד, בלי אישור."),
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string", "description": "נושא קצר, למשל 'משך אימון'"},
+            "value": {"type": "string", "description": "ההעדפה, למשל 'שעה וחצי'"},
+        }, "required": ["key", "value"]},
+    }},
+    {"type": "function", "function": {
+        "name": "forget_preference",
+        "description": "מחיקת העדפה קבועה לפי הנושא שלה.",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string"},
+        }, "required": ["key"]},
     }},
     {"type": "function", "function": {
         "name": "search_events",
@@ -183,8 +243,13 @@ def set_read_executor(name: str, fn) -> None:
     _read_executors[name] = fn
 
 
-def _system_prompt() -> str:
+def _system_prompt(chat_id: int) -> str:
     now = datetime.now(TZ)
+    prefs = db.get_preferences(chat_id)
+    prefs_block = ""
+    if prefs:
+        lines = "\n".join(f"- {k}: {v}" for k, v in prefs.items())
+        prefs_block = f"\n\n## העדפות קבועות של רון — כבד אותן בלי לשאול שוב\n{lines}"
     return prompts.SYSTEM_PROMPT.format(
         now=now.strftime("%Y-%m-%d %H:%M"),
         weekday=WEEKDAYS[now.weekday()],
@@ -222,6 +287,15 @@ def _summarize(name: str, args: dict) -> str:
         return f"להוסיף משימה: \"{args['title']}\"{due}?"
     if name == "complete_task":
         return f"לסמן כבוצע: \"{args.get('title', 'המשימה')}\"?"
+    if name == "schedule_prompt":
+        day = args.get("day_of_week", "*")
+        day_he = {"sun": "יום ראשון", "mon": "יום שני", "tue": "יום שלישי",
+                  "wed": "יום רביעי", "thu": "יום חמישי", "fri": "יום שישי",
+                  "sat": "שבת", "*": "כל יום"}.get(day, day)
+        return (f'לתזמן — {day_he} ב-{args.get("hour", 0):02d}:'
+                f'{args.get("minute", 0):02d}: "{args.get("prompt", "")}"?')
+    if name == "cancel_scheduled":
+        return f'לבטל את ההוראה המתוזמנת #{args.get("schedule_id")}?'
     if name == "log_activity":
         return f"לתעד: \"{args['content']}\"?"
     return "לבצע את הפעולה?"
@@ -306,7 +380,7 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
     db.add_message(chat_id, "user", text)
 
     history = db.get_history(chat_id, limit=6)
-    messages = [{"role": "system", "content": _system_prompt()}]
+    messages = [{"role": "system", "content": _system_prompt(chat_id)}]
     messages += [{"role": m["role"], "content": m["content"]} for m in history]
 
     proposed_any = False
