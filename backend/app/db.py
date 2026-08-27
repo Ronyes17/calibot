@@ -80,6 +80,38 @@ CREATE INDEX IF NOT EXISTS idx_activity ON activity_log(chat_id, log_date DESC);
 -- מטמון זמני נסיעה. בלעדיו כל בדיקת התנגשות היא קריאת API בתשלום.
 -- החיים שלך מכילים כ-20 מקומות חוזרים, אז אחרי כמה שבועות רוב הבדיקות
 -- ייענו מהמטמון בלי לצאת החוצה בכלל.
+CREATE TABLE IF NOT EXISTS habits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    active INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS habit_log (
+    habit_id INTEGER NOT NULL,
+    log_date TEXT NOT NULL,
+    UNIQUE(habit_id, log_date)
+);
+
+CREATE TABLE IF NOT EXISTS meals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    meal_date TEXT NOT NULL,
+    meal_time TEXT NOT NULL,
+    description TEXT NOT NULL,
+    kcal INTEGER,
+    protein_g INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    snap_date TEXT PRIMARY KEY,
+    nav REAL,
+    cash REAL,
+    positions TEXT,
+    fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_prompts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     INTEGER NOT NULL,
@@ -569,3 +601,90 @@ def deactivate_scheduled_prompt(schedule_id: int) -> bool:
             (schedule_id,),
         )
         return cur.rowcount > 0
+
+
+# ------------------------------------------------------------- הרגלים
+
+def add_habit(chat_id: int, name: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO habits (chat_id, name) VALUES (?, ?)", (chat_id, name))
+        return cur.lastrowid
+
+
+def remove_habit(chat_id: int, name: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE habits SET active = 0 WHERE chat_id = ? AND name = ? AND active = 1",
+            (chat_id, name))
+        return cur.rowcount > 0
+
+
+def list_habits(chat_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM habits WHERE chat_id = ? AND active = 1 ORDER BY id",
+            (chat_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_habit(chat_id: int, name: str) -> Optional[dict]:
+    """התאמה רכה: 'אימון' יתפוס גם 'אימון כושר'."""
+    name = name.strip()
+    for h in list_habits(chat_id):
+        if h["name"] == name or name in h["name"] or h["name"] in name:
+            return h
+    return None
+
+
+def log_habit(habit_id: int, log_date: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO habit_log (habit_id, log_date) VALUES (?, ?)",
+            (habit_id, log_date))
+
+
+def habit_dates(habit_id: int, limit: int = 120) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT log_date FROM habit_log WHERE habit_id = ? "
+            "ORDER BY log_date DESC LIMIT ?", (habit_id, limit)).fetchall()
+        return [r["log_date"] for r in rows]
+
+
+# ------------------------------------------------------------- תזונה
+
+def add_meal(chat_id: int, meal_date: str, meal_time: str,
+             description: str, kcal: int = None, protein_g: int = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meals (chat_id, meal_date, meal_time, description, kcal, protein_g) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, meal_date, meal_time, description, kcal, protein_g))
+
+
+def meals_for_date(chat_id: int, meal_date: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meals WHERE chat_id = ? AND meal_date = ? ORDER BY meal_time",
+            (chat_id, meal_date)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------- תיק השקעות
+
+def save_portfolio_snapshot(snap_date: str, nav: float, cash: float,
+                            positions_json: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio_snapshots (snap_date, nav, cash, positions) "
+            "VALUES (?, ?, ?, ?)", (snap_date, nav, cash, positions_json))
+
+
+def portfolio_history(limit: int = 30) -> list[dict]:
+    """מהחדש לישן."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM portfolio_snapshots ORDER BY snap_date DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [dict(r) for r in rows]

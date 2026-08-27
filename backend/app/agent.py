@@ -41,12 +41,15 @@ WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "ש�
 READ_TOOLS = {"query_events", "list_tasks", "search_events", "meeting_stats",
               "remember_preference", "forget_preference",
               "web_search", "search_knowledge", "list_scheduled",
-              "check_email", "workout_stats"}
+              "check_email", "workout_stats",
+              "log_habit", "habits_status", "log_meal", "nutrition_today",
+              "portfolio", "read_notes", "read_journal"}
 
 # כלים שמשנים משהו ולכן עוברים דרך אישור
 WRITE_TOOLS = {"create_event", "update_event", "delete_event",
                "add_task", "complete_task", "log_activity",
-               "schedule_prompt", "cancel_scheduled"}
+               "schedule_prompt", "cancel_scheduled",
+               "add_habit", "remove_habit", "save_note"}
 
 # מטופל בנפרד: הוא לא פעולה חדשה אלא הצעה מחדש של פעולה קיימת
 RESTORE_TOOL = "restore_last"
@@ -184,6 +187,78 @@ TOOLS = [
         "name": "list_scheduled",
         "description": "רשימת ההוראות המתוזמנות הפעילות.",
         "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "add_habit",
+        "description": "יצירת הרגל למעקב יומי ('תעקבי אחרי אימון').",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "שם ההרגל, קצר"},
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_habit",
+        "description": "הפסקת מעקב אחרי הרגל.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "log_habit",
+        "description": "סימון הרגל כבוצע היום ('התאמנתי', 'קראתי'). מבוצע מיד.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "habits_status",
+        "description": "מצב ההרגלים: מה סומן היום ומה הרצף של כל אחד.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "log_meal",
+        "description": ("רישום ארוחה ('אכלתי X'). אתה מעריך קלוריות וחלבון "
+                        "בעצמך לפי התיאור. מבוצע מיד."),
+        "parameters": {"type": "object", "properties": {
+            "description": {"type": "string", "description": "מה נאכל"},
+            "kcal": {"type": "integer", "description": "הערכת קלוריות"},
+            "protein_g": {"type": "integer", "description": "הערכת חלבון בגרם"},
+        }, "required": ["description", "kcal", "protein_g"]},
+    }},
+    {"type": "function", "function": {
+        "name": "nutrition_today",
+        "description": "סיכום התזונה של היום (או תאריך אחר).",
+        "parameters": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "YYYY-MM-DD, ריק=היום"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "portfolio",
+        "description": "תיק ההשקעות ב-Interactive Brokers: שווי, שינוי, פוזיציות.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "save_note",
+        "description": ("שמירת מידע לפתק נושא בזיכרון ארוך הטווח "
+                        "('תרשמי לך שהרכב בטסט בנובמבר')."),
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string", "description": "נושא הפתק, מילה-שתיים"},
+            "content": {"type": "string"},
+        }, "required": ["topic", "content"]},
+    }},
+    {"type": "function", "function": {
+        "name": "read_notes",
+        "description": ("קריאת פתק נושא, או רשימת כל הפתקים אם topic ריק. "
+                        "לשאלות 'מה רשום לך על X'."),
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "read_journal",
+        "description": "היומן האישי מהימים האחרונים — מה קרה, מה הספקת.",
+        "parameters": {"type": "object", "properties": {
+            "days": {"type": "integer", "description": "כמה ימים אחורה (ברירת מחדל 7)"},
+        }},
     }},
     {"type": "function", "function": {
         "name": "remember_preference",

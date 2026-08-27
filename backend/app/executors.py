@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from app import agent
 from app import db
-from app import websearch
+from app import websearch, habits as habits_mod, nutrition, ibkr, memfiles
 from app.confirm import register_executor
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,13 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     agent.set_read_executor("list_scheduled", list_scheduled)
     agent.set_read_executor("check_email", check_email)
     agent.set_read_executor("workout_stats", workout_stats)
+    agent.set_read_executor("log_habit", log_habit)
+    agent.set_read_executor("habits_status", habits_status)
+    agent.set_read_executor("log_meal", log_meal)
+    agent.set_read_executor("nutrition_today", nutrition_today)
+    agent.set_read_executor("portfolio", portfolio)
+    agent.set_read_executor("read_notes", read_notes)
+    agent.set_read_executor("read_journal", read_journal)
     agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
     agent.set_read_executor("search_events", search_events)
@@ -69,6 +76,13 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     agent.set_read_executor("list_scheduled", list_scheduled)
     agent.set_read_executor("check_email", check_email)
     agent.set_read_executor("workout_stats", workout_stats)
+    agent.set_read_executor("log_habit", log_habit)
+    agent.set_read_executor("habits_status", habits_status)
+    agent.set_read_executor("log_meal", log_meal)
+    agent.set_read_executor("nutrition_today", nutrition_today)
+    agent.set_read_executor("portfolio", portfolio)
+    agent.set_read_executor("read_notes", read_notes)
+    agent.set_read_executor("read_journal", read_journal)
     agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
 
@@ -343,6 +357,10 @@ async def _complete_task(payload: dict) -> str:
 async def _log_activity(payload: dict) -> str:
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     db.log_activity(_owner_chat_id, today, payload["content"])
+    try:
+        memfiles.append_journal(payload["content"])
+    except Exception as exc:
+        logger.warning("כתיבה ליומן הקבצים נכשלה: %s", exc)
     return "נרשם."
 
 
@@ -501,3 +519,71 @@ async def workout_stats(days: int = 7) -> dict:
         "days_since_last": (now - last).days if last else None,
         "titles": [e["summary"] for e in workouts],
     }
+
+
+# ------------------------------------------------- הרגלים / תזונה / תיק / זיכרון
+
+async def log_habit(name: str) -> str:
+    return habits_mod.mark(_owner_chat_id, name)
+
+
+async def habits_status() -> list[dict]:
+    rows = habits_mod.status(_owner_chat_id)
+    return rows or [{"info": "אין הרגלים במעקב. אפשר להוסיף עם 'תעקבי אחרי X'."}]
+
+
+async def log_meal(description: str, kcal: int = None, protein_g: int = None) -> str:
+    return nutrition.log(_owner_chat_id, description, kcal, protein_g)
+
+
+async def nutrition_today(date: str = None) -> str:
+    out = nutrition.day_summary(_owner_chat_id, date)
+    return out or "לא נרשמו ארוחות ביום הזה."
+
+
+async def portfolio() -> dict | str:
+    if not ibkr.configured():
+        return "חיבור IBKR לא מוגדר עדיין (חסר IBKR_FLEX_TOKEN בשרת)."
+    s = ibkr.summary()
+    if s is None:
+        # אין צילום — ננסה למשוך עכשיו (איטי, אבל חד-פעמי)
+        await ibkr.refresh()
+        s = ibkr.summary()
+    return s or "לא הצלחתי למשוך נתונים מ-IBKR. בדוק את הטוקן וה-Query."
+
+
+async def read_notes(topic: str = None) -> str:
+    if topic:
+        note = memfiles.read_note(topic)
+        return note or f"אין פתק בנושא '{topic}'. הפתקים הקיימים: {', '.join(memfiles.list_notes()) or 'אין'}."
+    notes = memfiles.list_notes()
+    return "הפתקים: " + ", ".join(notes) if notes else "אין פתקים עדיין."
+
+
+async def read_journal(days: int = 7) -> str:
+    out = memfiles.recent_journal(days=days)
+    return out or "היומן ריק בימים האלה."
+
+
+@register_executor("add_habit")
+async def _add_habit(payload: dict) -> str:
+    name = payload["name"].strip()
+    if db.find_habit(_owner_chat_id, name):
+        return f"כבר יש הרגל בשם '{name}'."
+    db.add_habit(_owner_chat_id, name)
+    return f"מעכשיו אני עוקבת אחרי '{name}'. תגיד לי כשביצעת ואסמן."
+
+
+@register_executor("remove_habit")
+async def _remove_habit(payload: dict) -> str:
+    h = db.find_habit(_owner_chat_id, payload["name"].strip())
+    if not h:
+        return "לא מצאתי הרגל כזה."
+    db.remove_habit(_owner_chat_id, h["name"])
+    return f"הפסקתי לעקוב אחרי '{h['name']}'."
+
+
+@register_executor("save_note")
+async def _save_note(payload: dict) -> str:
+    name = memfiles.write_note(payload["topic"], payload["content"])
+    return f"נשמר בפתק '{name}'."

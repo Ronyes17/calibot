@@ -48,6 +48,8 @@ async def _send(chat_id: int, text: str) -> None:
 async def lifespan(app: FastAPI):
     # --- 1. אחסון ---
     db.init_db()
+    from app import memfiles
+    memfiles.ensure_dirs()
 
     # --- 2. הזרקת טוקנים ---
     confirm.TELEGRAM_API_TOKEN = TELEGRAM_API_TOKEN

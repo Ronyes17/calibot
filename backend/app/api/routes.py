@@ -36,6 +36,44 @@ TZ = ZoneInfo("Asia/Jerusalem")
 calendar_service = GoogleCalendarService()
 
 
+@router.get("/dashboard")
+async def dashboard_view(key: str = "", view: str = "today"):
+    """דאשבורד קריאה בלבד. מוגן בקישור סודי: /dashboard?key=<DASHBOARD_TOKEN>."""
+    from fastapi.responses import HTMLResponse
+    from app import dashboard as dash
+    from app import executors as _ex
+    from app.config import OWNER_CHAT_ID
+
+    if not dash.token_ok(key):
+        return HTMLResponse("<h3>404</h3>", status_code=404)
+    if view not in ("today", "week"):
+        view = "today"
+    html_out = await dash.render(int(OWNER_CHAT_ID), _ex.fetch_events,
+                                 view=view, key=key)
+    return HTMLResponse(html_out)
+
+
+@router.post("/dashboard/chat")
+async def dashboard_chat(payload: dict):
+    """צ'אט מהפאנל בדאשבורד — אותה ניקול, אותה היסטוריה, בלי טלגרם באמצע."""
+    from fastapi.responses import JSONResponse
+    from app import dashboard as dash
+    from app.config import OWNER_CHAT_ID
+
+    if not dash.token_ok(payload.get("key", "")):
+        return JSONResponse({"reply": ""}, status_code=404)
+    text = (payload.get("text") or "").strip()[:2000]
+    if not text:
+        return {"reply": "לא קיבלתי טקסט."}
+    try:
+        reply = await agent.handle_message(int(OWNER_CHAT_ID), text)
+        # reply ריק = ניקול שלחה הצעת אישור עם כפתורים לטלגרם
+        return {"reply": reply or "הכנתי הצעה שדורשת אישור — שלחתי אותה לטלגרם שלך 📲"}
+    except Exception as exc:
+        logger.error("צ'אט הדאשבורד נכשל: %s", exc)
+        return {"reply": "משהו השתבש אצלי. נסה שוב?"}
+
+
 @router.get("/oauth2callback")
 async def oauth_callback(request: Request):
     """
@@ -110,10 +148,22 @@ async def telegram_webhook(update: TelegramUpdate):
         return {"status": "ok"}
 
     # --- 6. הסוכן ---
+    came_as_voice = bool(update.message.get("voice"))
+    VOICE_WORDS = ("תקליטי", "בקול", "הקליטי", "תעני בקול")
+    want_voice = came_as_voice or any(w in user_message for w in VOICE_WORDS)
     try:
         reply = await agent.handle_message(chat_id, user_message)
         if reply:                      # None = נשלחה הודעת אישור עם כפתורים
-            await send_telegram_message(chat_id, reply)
+            sent_as_voice = False
+            if want_voice:
+                audio, why = await tts.synthesize(reply)
+                if audio:
+                    await send_telegram_voice(chat_id, audio, caption=reply[:1024])
+                    sent_as_voice = True
+                else:
+                    logger.info("TTS לא סינתז (%s) — נופל לטקסט", why)
+            if not sent_as_voice:
+                await send_telegram_message(chat_id, reply)
     except Exception as exc:
         logger.error("הסוכן נכשל: %s", exc)
         await send_telegram_message(chat_id, "משהו השתבש. תנסה שוב?")

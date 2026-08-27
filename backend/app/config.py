@@ -14,5 +14,7 @@ GOOGLE_API_SCOPES = [
 ]
 OAUTH_REDIRECT_PATH = "/oauth2callback"
 
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID", "0")
+
 API_HOST = "localhost"
 API_PORT = 8060
