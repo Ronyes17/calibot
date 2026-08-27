@@ -118,12 +118,20 @@ async def telegram_webhook(update: TelegramUpdate):
         await send_telegram_message(chat_id, err)
         return {"status": "ok"}
 
-    # --- 3ב. תמונה: זימון תור, כרטיס, צילום מסך ---
+    # --- 3ב. תמונה: אוכל -> יומן תזונה; זימון/משמרות -> הסוכן ---
     if text is None:
-        text, err = await vision.photo_to_text(update.message)
+        kind, payload, err = await vision.analyze_photo(update.message)
         if err:
             await send_telegram_message(chat_id, err)
             return {"status": "ok"}
+        if kind == "meal":
+            from app import nutrition
+            reply = nutrition.log(chat_id, payload["description"],
+                                  payload.get("kcal"), payload.get("protein_g"))
+            await send_telegram_message(chat_id, f"📸 {reply}")
+            return {"status": "ok"}
+        if kind == "schedule":
+            text = payload
 
     user_message = text or update.message.get("text") or update.message.get("caption")
 

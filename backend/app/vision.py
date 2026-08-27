@@ -46,6 +46,22 @@ EXTRACT_PROMPT = (
     "החזר רק את הפרטים, בלי הקדמות."
 )
 
+CLASSIFY_PROMPT = (
+    "מה מופיע בתמונה? ענה במילה אחת בלבד:\n"
+    "אוכל — אם זו ארוחה, מנה, חטיף או משקה (צולם, לא תפריט)\n"
+    "לוז — אם זה צילום מסך/מסמך עם לוח זמנים, משמרות, תור או הודעה\n"
+    "אחר — כל דבר אחר"
+)
+
+FOOD_PROMPT = (
+    "זו תמונה של אוכל. זהה את המנה והערך ערכים תזונתיים למנה שנראית "
+    "בתמונה (גודל מנה ישראלי טיפוסי, לפי מה שרואים בפועל).\n"
+    "החזר JSON בלבד, בלי הסברים ובלי גרשי קוד, בפורמט:\n"
+    '{"is_food": true, "description": "תיאור קצר בעברית", '
+    '"kcal": מספר_שלם, "protein_g": מספר_שלם}\n'
+    'אם זו בעצם לא תמונת אוכל: {"is_food": false}'
+)
+
 _credentials = None
 _project_id: Optional[str] = None
 
@@ -98,34 +114,19 @@ async def _download_photo(file_id: str) -> Optional[bytes]:
         return None
 
 
-async def photo_to_text(message: dict) -> tuple[Optional[str], Optional[str]]:
-    """
-    נקודת הכניסה מ-routes. מחזיר (טקסט, שגיאה_להצגה).
-    (None, None) כשאין תמונה בהודעה בכלל.
-    """
-    photos = message.get("photo")
-    if not photos:
-        return None, None
-
-    file_id = photos[-1]["file_id"]   # הרזולוציה הגדולה ביותר
-
-    image = await _download_photo(file_id)
-    if image is None:
-        return None, "לא הצלחתי להוריד את התמונה. תנסה שוב?"
-
+async def _vertex_generate(image: bytes, prompt: str) -> Optional[str]:
+    """קריאה אחת ל-Vertex עם תמונה ופרומפט. None בכשל."""
     token = await asyncio.to_thread(_fresh_token_sync)
     if token is None:
-        return None, "עיבוד תמונות לא מוגדר (חסר חשבון שירות של Vertex)."
-
+        return None
     url = (f"https://{REGION}-aiplatform.googleapis.com/v1/projects/"
            f"{_project_id}/locations/{REGION}/publishers/google/models/"
            f"{MODEL}:generateContent")
-
     body = {
         "contents": [{
             "role": "user",
             "parts": [
-                {"text": EXTRACT_PROMPT},
+                {"text": prompt},
                 {"inline_data": {
                     "mime_type": "image/jpeg",
                     "data": base64.b64encode(image).decode("ascii"),
@@ -134,25 +135,84 @@ async def photo_to_text(message: dict) -> tuple[Optional[str], Optional[str]]:
         }],
         "generationConfig": {"temperature": 0.0},
     }
-
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                json=body,
-            )
+                url, headers={"Authorization": f"Bearer {token}"}, json=body)
             resp.raise_for_status()
             data = resp.json()
         parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts).strip()
+        return "".join(p.get("text", "") for p in parts).strip()
     except Exception as exc:
-        logger.error("חילוץ מתמונה נכשל: %s", exc)
-        return None, "לא הצלחתי לקרוא את התמונה. תוכל לכתוב את הפרטים?"
+        logger.error("קריאת Vertex נכשלה: %s", exc)
+        return None
 
-    if not text or "אין אירוע" in text:
-        return None, "לא מצאתי פרטי אירוע בתמונה."
 
+FOOD_HINTS = ("אכל", "ארוח", "קלוריות", "אוכל", "צהריים", "בוקר של", "ערב של")
+SCHED_HINTS = ("משמר", "תור", "פגיש", "זימון", "לוז", "יומן")
+
+
+async def analyze_photo(message: dict):
+    """
+    נקודת הכניסה מ-routes לתמונות.
+    מחזיר (kind, payload, err):
+      kind=None            אין תמונה בהודעה
+      kind="meal"          payload=dict של הארוחה (description/kcal/protein_g)
+      kind="schedule"      payload=טקסט לסוכן (הזרימה הישנה של משמרות/תורים)
+      err                  הודעת שגיאה להצגה למשתמש (כש-kind=None)
+    """
+    photos = message.get("photo")
+    if not photos:
+        return None, None, None
+
+    image = await _download_photo(photos[-1]["file_id"])
+    if image is None:
+        return None, None, "לא הצלחתי להוריד את התמונה. תנסה שוב?"
+
+    if _load_credentials() is None:
+        return None, None, "עיבוד תמונות לא מוגדר (חסר חשבון שירות של Vertex)."
+
+    # ניתוב: קודם לפי הכיתוב (חוסך קריאה), אחרת שאלת סיווג קצרה
     caption = (message.get("caption") or "").strip()
+    kind = None
+    if caption:
+        if any(w in caption for w in FOOD_HINTS):
+            kind = "אוכל"
+        elif any(w in caption for w in SCHED_HINTS):
+            kind = "לוז"
+    if kind is None:
+        answer = await _vertex_generate(image, CLASSIFY_PROMPT) or ""
+        kind = "אוכל" if "אוכל" in answer else "לוז" if "לוז" in answer else "אחר"
+
+    if kind == "אוכל":
+        raw = await _vertex_generate(image, FOOD_PROMPT)
+        if raw:
+            try:
+                clean = raw.replace("```json", "").replace("```", "").strip()
+                meal = json.loads(clean)
+                if meal.get("is_food") and meal.get("description"):
+                    return "meal", {
+                        "description": str(meal["description"])[:200],
+                        "kcal": int(meal.get("kcal") or 0) or None,
+                        "protein_g": int(meal.get("protein_g") or 0) or None,
+                    }, None
+            except (ValueError, TypeError) as exc:
+                logger.warning("JSON של ארוחה לא נקרא: %s | %r", exc, raw[:120])
+        return None, None, "זה נראה כמו אוכל אבל לא הצלחתי לזהות מה יש שם. תכתוב לי מה אכלת?"
+
+    # לוז / אחר — הזרימה המקורית: חילוץ טקסט והעברה לסוכן
+    text = await _vertex_generate(image, EXTRACT_PROMPT)
+    if text is None:
+        return None, None, "לא הצלחתי לקרוא את התמונה. תוכל לכתוב את הפרטים?"
+    if not text or "אין אירוע" in text:
+        return None, None, "לא מצאתי בתמונה אירוע או אוכל. מה רצית שאעשה איתה?"
     prefix = f"{caption}\n" if caption else ""
-    return (f"{prefix}מהתמונה שצירפתי:\n{text}\n\nתציע מה לקבוע לפי זה.", None)
+    return "schedule", (f"{prefix}מהתמונה שצירפתי:\n{text}\n\nתציע מה לקבוע לפי זה."), None
+
+
+async def photo_to_text(message: dict):
+    """תאימות לאחור — לא בשימוש אחרי עדכון routes."""
+    kind, payload, err = await analyze_photo(message)
+    if kind == "schedule":
+        return payload, None
+    return None, err
