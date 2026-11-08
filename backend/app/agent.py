@@ -32,6 +32,28 @@ TZ = ZoneInfo("Asia/Jerusalem")
 # גיאוגרפית מ-IP של דאטהסנטרים (נכון לאוגוסט 2026).
 # החלפת מודל = שינוי LLM_MODEL ב-.env והפעלה מחדש, בלי לגעת בקוד.
 MODEL = os.getenv("LLM_MODEL", "groq/openai/gpt-oss-120b")
+
+# מודל גיבוי: כש-Groq עמוס/נופל עוברים ל-Gemini ב-Vertex, עם חשבון השירות
+# שכבר משמש לתמונות. ריק ב-.env (FALLBACK_MODEL=) = בלי גיבוי.
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "vertex_ai/gemini-2.5-flash")
+
+
+def _fallback_kwargs() -> Optional[dict]:
+    sa = os.getenv("VERTEX_SA_FILE", "")
+    if not FALLBACK_MODEL or not sa or not os.path.exists(sa):
+        return None
+    try:
+        with open(sa, encoding="utf-8") as f:
+            creds = f.read()
+        return {
+            "model": FALLBACK_MODEL,
+            "vertex_credentials": creds,
+            "vertex_project": json.loads(creds).get("project_id"),
+            "vertex_location": os.getenv("VERTEX_REGION", "europe-west1"),
+        }
+    except Exception as exc:
+        logger.error("טעינת מודל הגיבוי נכשלה: %s", exc)
+        return None
 MAX_ROUNDS = 15
 
 WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
@@ -472,27 +494,26 @@ def _dedupe(proposals: list[dict]) -> list[dict]:
 
 async def _call_llm(messages: list) -> Optional[dict]:
     """
-    קריאה למודל עם ניסיון חוזר אחד על מגבלת קצב.
-    המדרגה החינמית של Groq מוגבלת ל-8000 טוקנים לדקה, ותור עם כמה
-    פריטים שולח כמה קריאות ברצף — קל לפגוע בתקרה. Groq מציינת בשגיאה
-    כמה לחכות; אם זה סביר, מחכים ומנסים שוב במקום להיכשל בפני המשתמש.
+    Groq קודם. בכל כישלון (מגבלת קצב, עומס, תקלה) — מיד ל-Gemini ב-Vertex,
+    בלי להמתין: עדיף תשובה ממודל אחר מאשר "עומס" בפני המשתמש.
     """
-    for attempt in (1, 2):
-        try:
-            return await acompletion(
-                model=MODEL, messages=messages, tools=TOOLS,
-                tool_choice="auto", max_tokens=4096,
-            )
-        except Exception as exc:
-            if "RateLimit" in type(exc).__name__ and attempt == 1:
-                match = re.search(r"in ([\d.]+)s", str(exc))
-                wait = min(float(match.group(1)) if match else 20.0, 25.0) + 1
-                logger.warning("מגבלת קצב — ממתין %.0f שניות ומנסה שוב", wait)
-                await asyncio.sleep(wait)
-                continue
-            logger.error("קריאה למודל נכשלה: %s", exc)
-            return None
-    return None
+    common = dict(messages=messages, tools=TOOLS, tool_choice="auto",
+                  max_tokens=4096)
+    try:
+        return await acompletion(model=MODEL, **common)
+    except Exception as exc:
+        logger.warning("המודל הראשי נכשל (%s): %s", type(exc).__name__,
+                       str(exc)[:200])
+
+    fallback = _fallback_kwargs()
+    if fallback is None:
+        return None
+    try:
+        logger.info("עובר למודל גיבוי: %s", FALLBACK_MODEL)
+        return await acompletion(**fallback, **common)
+    except Exception as exc:
+        logger.error("גם מודל הגיבוי נכשל: %s", str(exc)[:300])
+        return None
 
 
 async def handle_message(chat_id: int, text: str) -> Optional[str]:
