@@ -55,6 +55,7 @@ TG_FILE_LIMIT = 20 * 1024 * 1024   # בוטים לא יכולים להוריד �
 
 _calendar = None
 _owner: Optional[int] = None
+_background: set = set()   # משימות רקע חיות (שלא ייאספו באמצע)
 
 
 def register(calendar_service, owner_chat_id) -> None:
@@ -374,6 +375,7 @@ async def _summarize_youtube(url: str, focus_txt: str) -> str:
     if not summary:
         if vision._load_credentials() is None:
             return "סיכום YouTube דורש את חשבון השירות של Vertex."
+        logger.info("YouTube: שולחת ל-Gemini (רזולוציה נמוכה): %s", canonical)
         summary = await vision.vertex_call(
             [{"file_data": {"file_uri": canonical, "mime_type": "video/*"}},
              {"text": SUMMARY_PROMPT.format(focus=focus_txt) + "(זה סרטון YouTube)"}],
@@ -425,7 +427,16 @@ async def summarize_link(url: str, focus: str = "") -> str:
     focus_txt = f", עם דגש על: {focus}" if focus else ""
 
     if YT.search(url):
-        return await _summarize_youtube(url, focus_txt)
+        # סרטון ארוך יכול לקחת כמה דקות — ברקע, כדי שהוובהוק של טלגרם
+        # לא ימתין (ויישלח שוב) בזמן ש-Gemini צופה בסרטון.
+        async def _job():
+            result = await _summarize_youtube(url, focus_txt)
+            await send_long(_owner, "🎬 " + result)
+        task = asyncio.create_task(_job())
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+        return ("התחלתי לסכם את הסרטון ברקע — הסיכום יגיע בהודעה נפרדת תוך "
+                "כמה דקות. אמור למשתמש בקצרה שזה בטיפול.")
 
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
@@ -836,9 +847,6 @@ async def process_recording(chat_id: int, *, file_id: str = "", drive_file: str 
     except Exception as exc:
         logger.exception("עיבוד הקלטה נכשל")
         await send_telegram_message(chat_id, f"עיבוד ההקלטה נכשל: {exc}")
-
-
-_background: set = set()
 
 
 def start_recording_job(chat_id: int, **kw) -> None:
