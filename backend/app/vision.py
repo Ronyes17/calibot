@@ -78,6 +78,8 @@ RECEIPT_PROMPT = (
 )
 RECEIPT_HINTS = ("קבלה", "חשבונית", "הוצאה", "שילמתי", "קניתי")
 
+last_error = ""   # גוף השגיאה האחרונה מ-Vertex, לאבחון
+
 _credentials = None
 _project_id: Optional[str] = None
 
@@ -131,7 +133,7 @@ async def _download_photo(file_id: str) -> Optional[bytes]:
 
 
 async def vertex_call(parts: list, max_tokens: int = 8192,
-                      timeout: float = 60.0) -> Optional[str]:
+                      timeout: float = 60.0, extra_config: dict = None) -> Optional[str]:
     """
     קריאה כללית ל-Gemini ב-Vertex עם רשימת parts (טקסט, תמונה, וידאו
     מ-YouTube וכו'). משמשת גם את features.py. None בכשל.
@@ -144,13 +146,19 @@ async def vertex_call(parts: list, max_tokens: int = 8192,
            f"{MODEL}:generateContent")
     body = {
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": max_tokens},
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": max_tokens,
+                             **(extra_config or {})},
     }
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 url, headers={"Authorization": f"Bearer {token}"}, json=body)
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # גוף השגיאה של גוגל מסביר למה (וידאו ארוך מדי, פרטי וכו')
+                logger.error("Vertex %s: %s", resp.status_code, resp.text[:800])
+                global last_error
+                last_error = resp.text[:800]
+                return None
             data = resp.json()
         parts_out = data["candidates"][0]["content"]["parts"]
         return "".join(p.get("text", "") for p in parts_out).strip()

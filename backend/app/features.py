@@ -326,6 +326,78 @@ SUMMARY_PROMPT = (
 )
 
 
+def _yt_id(url: str) -> str:
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([\w-]{11})", url)
+    return m.group(1) if m else ""
+
+
+def _yt_transcript_sync(video_id: str) -> str:
+    """כתוביות (ידניות או אוטומטיות) — בלי וידאו בכלל. עלול להיחסם מ-IP של שרת."""
+    from youtube_transcript_api import YouTubeTranscriptApi
+    api = YouTubeTranscriptApi()
+    listing = api.list(video_id)
+    try:
+        tr = listing.find_transcript(["iw", "he", "en"])
+    except Exception:
+        tr = next(iter(listing))
+    return " ".join(s.text for s in tr.fetch())
+
+
+async def _summarize_youtube(url: str, focus_txt: str) -> str:
+    """
+    שני מסלולים:
+      1. כתוביות (youtube-transcript-api) -> סיכום טקסט. זול ומהיר, וגם
+         לסרטונים ארוכים מאוד. נכשל כשאין כתוביות או כש-YouTube חוסם את השרת.
+      2. Gemini צופה בסרטון ב-Vertex, ברזולוציה נמוכה (~100 טוקנים לשנייה,
+         כך ששעה ~360K טוקנים — בתוך מגבלת המודל; ברזולוציה רגילה שעה חורגת).
+    """
+    from app import vision
+    vid = _yt_id(url)
+    if not vid:
+        return "לא זיהיתי מזהה סרטון בקישור."
+    canonical = f"https://www.youtube.com/watch?v={vid}"
+    summary, why = None, []
+
+    try:
+        transcript = await asyncio.to_thread(_yt_transcript_sync, vid)
+        if len(transcript) > 300:
+            summary = await _llm(
+                SUMMARY_PROMPT.format(focus=focus_txt)
+                + "(תמלול של סרטון YouTube)\n\n" + transcript[:400_000],
+                max_tokens=4000, long=True)
+    except ImportError:
+        why.append("youtube-transcript-api לא מותקן")
+    except Exception as exc:
+        why.append(f"כתוביות: {type(exc).__name__}")
+        logger.info("כתוביות YouTube נכשלו: %s", exc)
+
+    if not summary:
+        if vision._load_credentials() is None:
+            return "סיכום YouTube דורש את חשבון השירות של Vertex."
+        summary = await vision.vertex_call(
+            [{"file_data": {"file_uri": canonical, "mime_type": "video/*"}},
+             {"text": SUMMARY_PROMPT.format(focus=focus_txt) + "(זה סרטון YouTube)"}],
+            max_tokens=8192, timeout=600,
+            extra_config={"mediaResolution": "MEDIA_RESOLUTION_LOW"})
+        if not summary:
+            err = (vision.last_error or "").lower()
+            if "exceed" in err or "token" in err or "too long" in err:
+                reason = "הסרטון ארוך מדי לעיבוד"
+            elif "permission" in err or "private" in err or "not accessible" in err:
+                reason = "הסרטון פרטי או חסום לגישה"
+            elif not err:
+                reason = "תם הזמן או שהשירות לא ענה"
+            else:
+                reason = "Vertex החזיר שגיאה"
+            why.append(reason)
+            logger.error("סיכום YouTube נכשל (%s): %s", url, vision.last_error[:300])
+            return ("לא הצלחתי לסכם את הסרטון: " + "; ".join(why)
+                    + ". הפרטים המלאים בלוג.")
+
+    db.add_document(f"🎬 {summary.splitlines()[0][:80]}", f"{canonical}\n\n{summary}")
+    return summary + "\n\n(נשמר בבסיס הידע)"
+
+
 def _html_to_text(raw: str) -> tuple[str, str]:
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
@@ -353,17 +425,7 @@ async def summarize_link(url: str, focus: str = "") -> str:
     focus_txt = f", עם דגש על: {focus}" if focus else ""
 
     if YT.search(url):
-        from app import vision
-        if vision._load_credentials() is None:
-            return "סיכום YouTube דורש את חשבון השירות של Vertex."
-        summary = await vision.vertex_call(
-            [{"file_data": {"file_uri": url, "mime_type": "video/*"}},
-             {"text": SUMMARY_PROMPT.format(focus=focus_txt) + "(זה סרטון YouTube)"}],
-            max_tokens=8192, timeout=300)
-        if not summary:
-            return "לא הצלחתי לעבד את הסרטון (אולי פרטי, ארוך מדי, או חסום)."
-        db.add_document(f"🎬 {summary.splitlines()[0][:80]}", f"{url}\n\n{summary}")
-        return summary + "\n\n(נשמר בבסיס הידע)"
+        return await _summarize_youtube(url, focus_txt)
 
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
