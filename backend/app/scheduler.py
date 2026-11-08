@@ -32,6 +32,7 @@ from app import weather
 from app import db, habits, nutrition, ibkr, memfiles, confirm, gmail_sender
 from app import weather
 from app import travel
+from app import extras
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,20 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
     _deps = deps
 
     scheduler = AsyncIOScheduler(timezone=TZ)
+    extras.init(deps)
+
+    scheduler.add_job(
+        extras.weekly_summary,
+        CronTrigger(day_of_week=extras.WEEKLY_DAY, hour=extras.WEEKLY_HOUR,
+                    minute=extras.WEEKLY_MINUTE),
+        id="weekly_summary", coalesce=True, misfire_grace_time=7200,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        extras.event_reminders, CronTrigger(minute="*/5"),
+        id="event_reminders", coalesce=True, misfire_grace_time=120,
+        max_instances=1, replace_existing=True,
+    )
 
     if ibkr.configured():
         # רבע שעה לפני הבריף, כדי שהשורה בבריף תהיה טרייה
@@ -451,7 +466,7 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
             ib_minute += 60
             ib_hour = (MORNING_HOUR - 1) % 24
         scheduler.add_job(
-            ibkr.refresh, CronTrigger(hour=ib_hour, minute=ib_minute),
+            extras.ibkr_refresh_and_alert, CronTrigger(hour=ib_hour, minute=ib_minute),
             id="ibkr_refresh", coalesce=True, misfire_grace_time=3600,
         )
 

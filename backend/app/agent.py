@@ -83,8 +83,8 @@ TOOLS = [
         "description": "קובע אירוע חדש ביומן. דורש אישור מהמשתמש.",
         "parameters": {"type": "object", "properties": {
             "title": {"type": "string", "description": "כותרת האירוע"},
-            "start": {"type": "string", "description": "התחלה ISO עם אזור זמן"},
-            "end": {"type": "string", "description": "סיום ISO עם אזור זמן"},
+            "start": {"type": "string", "description": "התחלה ISO בשעון ישראל, למשל 2026-11-10T18:00:00"},
+            "end": {"type": "string", "description": "סיום ISO בשעון ישראל"},
             "location": {"type": "string", "description": "כתובת. ריק לאירוע וירטואלי"},
             "virtual": {"type": "boolean",
                         "description": "true לפגישה טלפונית/זום — אין נסיעה"},
@@ -381,10 +381,29 @@ def _system_prompt(chat_id: int) -> str:
     )
 
 
+def _occurrences(args: dict) -> int:
+    """
+    כמה מפגשים אירוע מייצג: 1 לחד-פעמי, COUNT לחוזר. חוזר בלי COUNT/UNTIL
+    נחשב כמכסה את כל הרשימה (999), כדי שבדיקת "חסרים אירועים" לא תדחוף
+    את המודל לפרק אותו לאירועים בודדים.
+    """
+    rec = str(args.get("recurrence") or "")
+    rule = str(args.get("rrule") or "")
+    if not rec and not rule:
+        return 1
+    m = re.search(r"COUNT=(\d+)", rule)
+    if m:
+        return int(m.group(1))
+    parts = rec.split(",")
+    if len(parts) > 1 and parts[1].strip().isdigit():
+        return int(parts[1].strip())
+    return 999
+
+
 def _summarize(name: str, args: dict) -> str:
     """הטקסט שמוצג לך בהודעת האישור."""
     if name == "create_event":
-        start = datetime.fromisoformat(args["start"])
+        start = _local(args["start"])
         when = start.strftime("%d/%m בשעה %H:%M")
         where = ""
         if args.get("virtual"):
@@ -400,7 +419,9 @@ def _summarize(name: str, args: dict) -> str:
             names = {"DAILY": "כל יום", "WEEKLY": "כל שבוע",
                      "MONTHLY": "כל חודש", "YEARLY": "כל שנה"}
             freq = str(args["recurrence"]).split(",")[0].upper()
-            repeat = f" ({names.get(freq, 'חוזר')})"
+            repeat = f" ({names.get(freq, 'חוזר')}"
+            n = _occurrences(args)
+            repeat += f", {n} מפגשים)" if n > 1 else ")"
         return f"לקבוע \"{args['title']}\" ב-{when}{where}{repeat}?"
 
     if name == "update_event":
@@ -545,7 +566,8 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
 
         if not tool_calls:
             reply = (choice.get("content") or "").strip()
-            created = sum(1 for p in proposals if p["action_type"] == "create_event")
+            created = sum(_occurrences(p["payload"]) for p in proposals
+                          if p["action_type"] == "create_event")
             if expected and created < expected and nudges < 2:
                 nudges += 1
                 logger.info("נוצרו %s מתוך %s אירועים — מבקש השלמה", created, expected)
@@ -553,7 +575,8 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 messages.append({"role": "user", "content": (
                     f"נוספו {created} מתוך {expected} האירועים שברשימה. עבור שוב "
                     "על הרשימה הממוספרת, מצא את האירועים שעוד לא נוספו, וקרא "
-                    "ל-create_event רק עבורם. אל תוסיף שוב אירוע שכבר נוסף."
+                    "ל-create_event רק עבורם. אל תוסיף שוב אירוע שכבר נוסף "
+                    "(אירוע חוזר עם COUNT כבר מכסה את כל המפגשים שלו)."
                 )})
                 continue
             if proposals:
