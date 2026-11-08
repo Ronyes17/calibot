@@ -173,6 +173,14 @@ async def build_weekly_summary(now: Optional[datetime] = None) -> str:
     if food:
         lines.append(food)
 
+    try:
+        from app import features
+        spent = features.expenses_week_line(chat_id, week_start)
+        if spent:
+            lines.append(spent)
+    except Exception as exc:
+        logger.warning("שורת הוצאות לסיכום נכשלה: %s", exc)
+
     port = _portfolio_week_line(now)
     if port:
         lines.append(port)

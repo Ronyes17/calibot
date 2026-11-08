@@ -53,6 +53,7 @@ EXTRACT_PROMPT = (
 CLASSIFY_PROMPT = (
     "מה מופיע בתמונה? ענה במילה אחת בלבד:\n"
     "אוכל — אם זו ארוחה, מנה, חטיף או משקה (צולם, לא תפריט)\n"
+    "קבלה — אם זו קבלה, חשבונית, אישור תשלום או צילום מסך של עסקה\n"
     "לוז — אם זה צילום מסך/מסמך עם לוח זמנים, משמרות, תור או הודעה\n"
     "אחר — כל דבר אחר"
 )
@@ -65,6 +66,17 @@ FOOD_PROMPT = (
     '"kcal": מספר_שלם, "protein_g": מספר_שלם}\n'
     'אם זו בעצם לא תמונת אוכל: {"is_food": false}'
 )
+
+RECEIPT_PROMPT = (
+    "זו קבלה או אישור תשלום. חלץ ממנה את פרטי ההוצאה.\n"
+    "החזר JSON בלבד, בלי הסברים ובלי גרשי קוד:\n"
+    '{"is_receipt": true, "merchant": "שם העסק", "total": מספר (הסכום '
+    'הסופי ששולם), "currency": "ILS או USD", "date": "YYYY-MM-DD או ריק", '
+    '"category": אחת מ: מזון, מסעדות, תחבורה, דלק, קניות, בית, חשבונות, '
+    'בריאות, בילוי, לימודים, מנויים, אחר}\n'
+    'אם זו לא קבלה: {"is_receipt": false}'
+)
+RECEIPT_HINTS = ("קבלה", "חשבונית", "הוצאה", "שילמתי", "קניתי")
 
 _credentials = None
 _project_id: Optional[str] = None
@@ -118,8 +130,12 @@ async def _download_photo(file_id: str) -> Optional[bytes]:
         return None
 
 
-async def _vertex_generate(image: bytes, prompt: str) -> Optional[str]:
-    """קריאה אחת ל-Vertex עם תמונה ופרומפט. None בכשל."""
+async def vertex_call(parts: list, max_tokens: int = 8192,
+                      timeout: float = 60.0) -> Optional[str]:
+    """
+    קריאה כללית ל-Gemini ב-Vertex עם רשימת parts (טקסט, תמונה, וידאו
+    מ-YouTube וכו'). משמשת גם את features.py. None בכשל.
+    """
     token = await asyncio.to_thread(_fresh_token_sync)
     if token is None:
         return None
@@ -127,28 +143,39 @@ async def _vertex_generate(image: bytes, prompt: str) -> Optional[str]:
            f"{_project_id}/locations/{REGION}/publishers/google/models/"
            f"{MODEL}:generateContent")
     body = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": base64.b64encode(image).decode("ascii"),
-                }},
-            ],
-        }],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": max_tokens},
     }
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 url, headers={"Authorization": f"Bearer {token}"}, json=body)
             resp.raise_for_status()
             data = resp.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts).strip()
+        parts_out = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts_out).strip()
     except Exception as exc:
         logger.error("קריאת Vertex נכשלה: %s", exc)
+        return None
+
+
+async def _vertex_generate(image: bytes, prompt: str) -> Optional[str]:
+    """קריאה אחת ל-Vertex עם תמונה ופרומפט. None בכשל."""
+    return await vertex_call([
+        {"text": prompt},
+        {"inline_data": {"mime_type": "image/jpeg",
+                         "data": base64.b64encode(image).decode("ascii")}},
+    ])
+
+
+def _json(raw: Optional[str]) -> Optional[dict]:
+    if not raw:
+        return None
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(clean)
+    except ValueError:
+        logger.warning("JSON לא נקרא: %r", raw[:150])
         return None
 
 
@@ -162,6 +189,7 @@ async def analyze_photo(message: dict):
     מחזיר (kind, payload, err):
       kind=None            אין תמונה בהודעה
       kind="meal"          payload=dict של הארוחה (description/kcal/protein_g)
+      kind="receipt"       payload=dict של הוצאה (amount/currency/merchant/category/date)
       kind="schedule"      payload=טקסט לסוכן (הזרימה הישנה של משמרות/תורים)
       err                  הודעת שגיאה להצגה למשתמש (כש-kind=None)
     """
@@ -180,13 +208,31 @@ async def analyze_photo(message: dict):
     caption = (message.get("caption") or "").strip()
     kind = None
     if caption:
-        if any(w in caption for w in FOOD_HINTS):
+        if any(w in caption for w in RECEIPT_HINTS):
+            kind = "קבלה"
+        elif any(w in caption for w in FOOD_HINTS):
             kind = "אוכל"
         elif any(w in caption for w in SCHED_HINTS):
             kind = "לוז"
     if kind is None:
         answer = await _vertex_generate(image, CLASSIFY_PROMPT) or ""
-        kind = "אוכל" if "אוכל" in answer else "לוז" if "לוז" in answer else "אחר"
+        kind = ("קבלה" if "קבלה" in answer else "אוכל" if "אוכל" in answer
+                else "לוז" if "לוז" in answer else "אחר")
+
+    if kind == "קבלה":
+        rec = _json(await _vertex_generate(image, RECEIPT_PROMPT))
+        if rec and rec.get("is_receipt") and rec.get("total"):
+            try:
+                return "receipt", {
+                    "amount": float(rec["total"]),
+                    "currency": (rec.get("currency") or "ILS").upper()[:3],
+                    "merchant": str(rec.get("merchant") or "")[:80],
+                    "category": str(rec.get("category") or "אחר")[:20],
+                    "date": str(rec.get("date") or "")[:10],
+                }, None
+            except (TypeError, ValueError):
+                pass
+        return None, None, "זו נראית כמו קבלה אבל לא הצלחתי לקרוא את הסכום. כמה שילמת ועל מה?"
 
     if kind == "אוכל":
         raw = await _vertex_generate(image, FOOD_PROMPT)

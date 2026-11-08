@@ -52,6 +52,8 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     _calendar = service
     _owner_chat_id = owner_chat_id
     agent.set_read_executor("query_events", fetch_events)
+    from app import features
+    features.register(service, owner_chat_id)
     agent.set_read_executor("list_tasks", list_tasks)
     agent.set_read_executor("search_events", search_events)
     agent.set_read_executor("remember_preference", remember_preference)
@@ -161,6 +163,11 @@ async def fetch_events(start: datetime, end: datetime) -> list[dict]:
                 "location": ev.get("location", "") or "",
                 "description": ev.get("description", "") or "",
                 "colorId": ev.get("colorId", ""),
+                # משתתפים אחרים (בלי עצמי) — להכנה לפגישה
+                "attendees": [a.get("email", "") for a in ev.get("attendees", [])
+                              if a.get("email") and not a.get("self")
+                              and not a.get("resource")],
+                "hangoutLink": ev.get("hangoutLink", "") or "",
             })
         except Exception as exc:
             logger.warning("דילוג על אירוע שלא נפרסר: %s", exc)

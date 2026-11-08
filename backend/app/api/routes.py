@@ -112,6 +112,17 @@ async def telegram_webhook(update: TelegramUpdate):
         )
         return {"status": "ok"}
 
+    # --- 3א. הקלטה ארוכה / קובץ אודיו: תמלול וסיכום ברקע ---
+    from app import features
+    if features.is_recording(update.message, voice.MAX_DURATION_SECONDS):
+        media = features.media_of(update.message)
+        features.start_recording_job(
+            chat_id, file_id=media["file_id"], size=media.get("file_size") or 0,
+            title=(update.message.get("caption") or media.get("file_name")
+                   or media.get("title") or ""))
+        await send_telegram_message(chat_id, "🎙 קיבלתי. מעבדת את ההקלטה ברקע…")
+        return {"status": "ok"}
+
     # --- 3. הודעה קולית ---
     text, err = await voice.voice_to_text(update.message)
     if err:
@@ -129,6 +140,15 @@ async def telegram_webhook(update: TelegramUpdate):
             reply = nutrition.log(chat_id, payload["description"],
                                   payload.get("kcal"), payload.get("protein_g"))
             await send_telegram_message(chat_id, f"📸 {reply}")
+            return {"status": "ok"}
+        if kind == "receipt":
+            from app import features
+            reply = features.add_expense(
+                chat_id, payload["amount"], payload.get("category") or "אחר",
+                payload.get("merchant") or "", payload.get("currency") or "ILS",
+                payload.get("date") or "")
+            await send_telegram_message(
+                chat_id, f"🧾 {reply}\n(טעות? כתוב 'תמחקי את ההוצאה האחרונה')")
             return {"status": "ok"}
         if kind == "schedule":
             text = payload
@@ -238,6 +258,19 @@ async def _quick_command(chat_id: int, text: str):
             for e in sorted(events, key=lambda e: e["start"])
         )
 
+    if cmd in ("/reauth", "/התחברות"):
+        # אימות מחדש מול גוגל — נדרש אחרי הוספת הרשאות (Drive/Sheets)
+        import os as _os
+        for f in ("token.pickle",):
+            try:
+                _os.remove(f)
+            except FileNotFoundError:
+                pass
+        calendar_service.credentials = None
+        calendar_service.service = None
+        return ("כדי לאשר מחדש את ההרשאות של גוגל (יומן, מייל, Drive, Sheets), "
+                f"פתח את הקישור:\n{calendar_service.get_auth_url()}")
+
     if cmd == "/undo":
         return await executors.undo(chat_id)
 
@@ -249,7 +282,8 @@ async def _quick_command(chat_id: int, text: str):
             "/tomorrow — מה יש מחר\n"
             "/week — השבוע הקרוב\n"
             "/tasks — משימות פתוחות\n"
-            "/undo — ביטול האירוע האחרון"
+            "/undo — ביטול האירוע האחרון\n"
+            "/reauth — אישור מחדש של הרשאות גוגל"
         )
 
     return None

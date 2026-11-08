@@ -15,6 +15,7 @@
 ולכן אפשר לבדוק את כל השכבה בלי רשת.
 """
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -125,6 +126,15 @@ async def morning_brief() -> None:
             lines.append(port_line)
     except Exception as exc:
         logger.warning("שורת תיק לבריף נכשלה: %s", exc)
+
+    if os.getenv("MARKET_NEWS", "1") != "0" and now.weekday() < 5:
+        try:
+            from app import features
+            news = await asyncio.wait_for(features.market_news(), timeout=90)
+            if news:
+                lines.append("📰 " + news.replace("\n", "\n   "))
+        except Exception as exc:
+            logger.warning("חדשות שוק לבריף נכשלו: %s", exc)
 
     try:
         habit_line = habits.brief_line(_deps.chat_id)
@@ -450,6 +460,22 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
         CronTrigger(day_of_week=extras.WEEKLY_DAY, hour=extras.WEEKLY_HOUR,
                     minute=extras.WEEKLY_MINUTE),
         id="weekly_summary", coalesce=True, misfire_grace_time=7200,
+        replace_existing=True,
+    )
+    from app import features
+
+    async def _meeting_prep():
+        await features.meeting_prep_job(deps.send, deps.chat_id, deps.fetch_events)
+
+    scheduler.add_job(
+        _meeting_prep, CronTrigger(minute="*/5"),
+        id="meeting_prep", coalesce=True, misfire_grace_time=120,
+        max_instances=1, replace_existing=True,
+    )
+    scheduler.add_job(
+        features.learn_from_today,
+        CronTrigger(hour=features.LEARN_HOUR, minute=features.LEARN_MINUTE),
+        id="learn_memory", coalesce=True, misfire_grace_time=7200,
         replace_existing=True,
     )
     scheduler.add_job(

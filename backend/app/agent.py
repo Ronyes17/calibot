@@ -360,6 +360,12 @@ TOOLS = [
     }},
 ]
 
+# כלים מ-features.py (הקלטות, דרייב, הוצאות, חלונות פנויים, קישורים...)
+from app import features as _features  # noqa: E402
+TOOLS += _features.TOOLS
+READ_TOOLS |= _features.READ
+WRITE_TOOLS |= _features.WRITE
+
 # מוזרק מבחוץ כדי שהמודול יישאר נבדק בלי גוגל
 _read_executors: dict = {}
 
@@ -375,10 +381,15 @@ def _system_prompt(chat_id: int) -> str:
     if prefs:
         lines = "\n".join(f"- {k}: {v}" for k, v in prefs.items())
         prefs_block = f"\n\n## העדפות קבועות של רון — כבד אותן בלי לשאול שוב\n{lines}"
-    return prompts.SYSTEM_PROMPT.format(
+    base = prompts.SYSTEM_PROMPT.format(
         now=now.strftime("%Y-%m-%d %H:%M"),
         weekday=WEEKDAYS[now.weekday()],
     )
+    try:
+        learned = _features.profile_block()
+    except Exception:
+        learned = ""
+    return base + prefs_block + learned
 
 
 def _occurrences(args: dict) -> int:
@@ -444,6 +455,10 @@ def _summarize(name: str, args: dict) -> str:
         return f'לבטל את ההוראה המתוזמנת #{args.get("schedule_id")}?'
     if name == "log_activity":
         return f"לתעד: \"{args['content']}\"?"
+    if name == "sheet_append":
+        vals = args.get("values") or []
+        vals = " | ".join(map(str, vals)) if isinstance(vals, list) else str(vals)
+        return f"להוסיף לגיליון '{args.get('spreadsheet')}': {vals}?"
     return "לבצע את הפעולה?"
 
 
@@ -535,6 +550,30 @@ async def _call_llm(messages: list) -> Optional[dict]:
     except Exception as exc:
         logger.error("גם מודל הגיבוי נכשל: %s", str(exc)[:300])
         return None
+
+
+async def complete_text(prompt: str, max_tokens: int = 2000,
+                        long: bool = False) -> Optional[str]:
+    """
+    טקסט חופשי בלי כלים (סיכומים, חילוץ). long=True: Gemini קודם —
+    הקשר ארוך, ובלי תקרת 8K הטוקנים לדקה של Groq החינמי.
+    """
+    messages = [{"role": "user", "content": prompt}]
+    fallback = _fallback_kwargs()
+    primary = {"model": MODEL}
+    order = ([fallback, primary] if long and fallback
+             else [primary] + ([fallback] if fallback else []))
+    for kw in order:
+        try:
+            resp = await acompletion(**kw, messages=messages,
+                                     max_tokens=max(max_tokens, 1024))
+            text = (resp["choices"][0]["message"].get("content") or "").strip()
+            if text:
+                return text
+        except Exception as exc:
+            logger.warning("complete_text נכשל ב-%s: %s", kw.get("model"),
+                           str(exc)[:200])
+    return None
 
 
 async def handle_message(chat_id: int, text: str) -> Optional[str]:
