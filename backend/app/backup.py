@@ -18,6 +18,8 @@ Drive מחייבת אישור מחדש של החשבון. אפשר, אבל זה 
 """
 
 import gzip
+import io
+import json
 import tarfile
 import logging
 import os
@@ -122,14 +124,121 @@ async def upload(path: Path) -> bool:
                     },
                     files={"document": (path.name, fh, "application/gzip")},
                 )
-        ok = resp.json().get("ok", False)
+        data = resp.json()
+        ok = data.get("ok", False)
         if not ok:
             logger.error("שליחת גיבוי נכשלה: %s", resp.text)
+        else:
+            _remember_upload(path.name, data["result"]["document"]["file_id"])
         return ok
 
     except Exception as exc:
         logger.error("שליחת גיבוי נכשלה: %s", exc)
         return False
+
+
+# --------------------------------------------- בדיקת שחזור
+# גיבוי שלא נבדק הוא תקווה. פעם בחודש מורידים את מה שבאמת יושב בטלגרם
+# (לא את העותק המקומי) ומוודאים שהוא נפתח: sqlite תקין, טבלאות עם נתונים,
+# ארכיון זיכרון שנקרא. התוצאה נשלחת לבעלים — גם כשהכל תקין.
+
+UPLOADS_FILE = BACKUP_DIR / "last_uploads.json"
+
+
+def _remember_upload(name: str, file_id: str) -> None:
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        data = json.loads(UPLOADS_FILE.read_text()) if UPLOADS_FILE.exists() else {}
+        kind = "memory" if name.startswith("memory-") else "db"
+        data[kind] = {"name": name, "file_id": file_id,
+                      "at": datetime.now(TZ).isoformat(timespec="minutes")}
+        UPLOADS_FILE.write_text(json.dumps(data, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("שמירת מזהה הגיבוי נכשלה: %s", exc)
+
+
+async def _download(client: httpx.AsyncClient, file_id: str) -> bytes:
+    base = f"https://api.telegram.org/bot{TELEGRAM_API_TOKEN}"
+    meta = (await client.get(f"{base}/getFile", params={"file_id": file_id})).json()
+    path = meta["result"]["file_path"]
+    resp = await client.get(
+        f"https://api.telegram.org/file/bot{TELEGRAM_API_TOKEN}/{path}")
+    resp.raise_for_status()
+    return resp.content
+
+
+def _check_db(blob: bytes) -> str:
+    raw = gzip.decompress(blob)
+    tmp = BACKUP_DIR / "verify.db"
+    tmp.write_bytes(raw)
+    try:
+        con = sqlite3.connect(tmp)
+        status = con.execute("PRAGMA integrity_check").fetchone()[0]
+        if status != "ok":
+            raise ValueError(f"integrity_check: {status}")
+        tables = [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'")]
+        rows = 0
+        for t in tables:
+            try:
+                rows += con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            except sqlite3.Error:
+                pass
+        con.close()
+        return f"מסד נתונים: {len(tables)} טבלאות, {rows:,} רשומות, תקין"
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _check_memory(blob: bytes) -> str:
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        md = [m for m in tar.getmembers() if m.name.endswith(".md")]
+        for m in md:
+            tar.extractfile(m).read()
+    return f"זיכרון: {len(md)} קבצים, נקראו בהצלחה"
+
+
+async def verify_restore() -> str:
+    """
+    ג'וב חודשי. מחזיר את הדוח (גם לשימוש ידני):
+        python -c "import asyncio; from app import backup; print(asyncio.run(backup.verify_restore()))"
+    """
+    lines, failed = [], False
+    try:
+        data = json.loads(UPLOADS_FILE.read_text()) if UPLOADS_FILE.exists() else {}
+    except Exception:
+        data = {}
+    if not data.get("db"):
+        lines.append("❌ אין גיבוי מסד נתונים רשום שנשלח לטלגרם")
+        failed = True
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for kind, check in (("db", _check_db), ("memory", _check_memory)):
+            entry = data.get(kind)
+            if not entry:
+                continue
+            try:
+                blob = await _download(client, entry["file_id"])
+                lines.append(f"✅ {check(blob)} ({entry['name']})")
+            except Exception as exc:
+                failed = True
+                lines.append(f"❌ {entry['name']}: לא נפתח — {exc}")
+
+    report = ("⚠️ בדיקת שחזור גיבוי נכשלה" if failed
+              else "🗄️ בדיקת שחזור חודשית: הגיבוי בטלגרם נפתח תקין") + \
+        "\n" + "\n".join(lines)
+    logger.info(report)
+    owner = os.getenv("OWNER_CHAT_ID")
+    if TELEGRAM_API_TOKEN and owner:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_API_TOKEN}/sendMessage",
+                    data={"chat_id": owner, "text": report})
+        except Exception as exc:
+            logger.error("שליחת דוח בדיקת הגיבוי נכשלה: %s", exc)
+    return report
 
 
 def create_memory_snapshot() -> Optional[Path]:

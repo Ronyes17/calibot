@@ -481,6 +481,13 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
         id="daily_backup", coalesce=True, misfire_grace_time=21600,
         replace_existing=True,
     )
+    # בדיקת שחזור: ב-1 לכל חודש, שעה אחרי הגיבוי היומי
+    scheduler.add_job(
+        backup.verify_restore,
+        CronTrigger(day=1, hour=(BACKUP_HOUR + 1) % 24, minute=BACKUP_MINUTE),
+        id="verify_restore", coalesce=True, misfire_grace_time=86400,
+        replace_existing=True,
+    )
 
     scheduler.start()
     _scheduler = scheduler
