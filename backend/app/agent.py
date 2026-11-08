@@ -528,25 +528,78 @@ def _dedupe(proposals: list[dict]) -> list[dict]:
     return out
 
 
+_GROQ_TOOLS: Optional[list] = None
+
+
+def _groq_tools() -> list:
+    """
+    Groq מאמת ארגומנטים לפי הסכמה בקפדנות, ו-gpt-oss שולח לפעמים null
+    לפרמטר רשות ("focus": null) — מה שנדחה. לכן ל-Groq בלבד: כל פרמטר
+    רשות מקבל גם null. (Gemini לא אוהב type כרשימה — הוא מקבל את המקור.)
+    """
+    global _GROQ_TOOLS
+    if _GROQ_TOOLS is None:
+        import copy
+        tools = copy.deepcopy(TOOLS)
+        for t in tools:
+            params = t["function"].get("parameters") or {}
+            required = set(params.get("required") or [])
+            for name, prop in (params.get("properties") or {}).items():
+                if name in required or "type" not in prop:
+                    continue
+                if isinstance(prop["type"], str) and "enum" not in prop:
+                    prop["type"] = [prop["type"], "null"]
+                elif "enum" in prop:
+                    prop["enum"] = list(prop["enum"]) + [None]
+                    prop["type"] = [prop["type"], "null"]
+        _GROQ_TOOLS = tools
+    return _GROQ_TOOLS
+
+
+def _clean_assistant(choice) -> dict:
+    """
+    הודעת עוזר נקייה להיסטוריה. תשובה מ-Gemini מגיעה עם שדות נוספים
+    (images, thinking_blocks...) ש-Groq דוחה בסבב הבא — אז שומרים רק
+    role/content/tool_calls.
+    """
+    out = {"role": "assistant", "content": choice.get("content") or ""}
+    calls = []
+    for i, tc in enumerate(choice.get("tool_calls") or []):
+        fn = tc["function"]
+        calls.append({
+            "id": tc.get("id") or f"call_{i}",
+            "type": "function",
+            "function": {"name": fn["name"], "arguments": fn.get("arguments") or "{}"},
+        })
+    if calls:
+        out["tool_calls"] = calls
+    return out
+
+
 async def _call_llm(messages: list) -> Optional[dict]:
     """
     Groq קודם. בכל כישלון (מגבלת קצב, עומס, תקלה) — מיד ל-Gemini ב-Vertex,
     בלי להמתין: עדיף תשובה ממודל אחר מאשר "עומס" בפני המשתמש.
     """
-    common = dict(messages=messages, tools=TOOLS, tool_choice="auto",
-                  max_tokens=4096)
-    try:
-        return await acompletion(model=MODEL, **common)
-    except Exception as exc:
-        logger.warning("המודל הראשי נכשל (%s): %s", type(exc).__name__,
-                       str(exc)[:200])
+    common = dict(messages=messages, tool_choice="auto", max_tokens=4096)
+    for attempt in (1, 2):
+        try:
+            return await acompletion(model=MODEL, tools=_groq_tools(), **common)
+        except Exception as exc:
+            msg = str(exc)
+            logger.warning("המודל הראשי נכשל (%s): %s", type(exc).__name__,
+                           msg[:200])
+            # המודל "הזה" שם כלי לא קיים / ארגומנט לא תקין — לרוב חולף בניסיון שני
+            if attempt == 1 and "Tool call validation failed" in msg:
+                continue
+            break
 
     fallback = _fallback_kwargs()
     if fallback is None:
         return None
     try:
         logger.info("עובר למודל גיבוי: %s", FALLBACK_MODEL)
-        return await acompletion(**fallback, **common)
+        return await acompletion(**fallback, tools=TOOLS, **common)
     except Exception as exc:
         logger.error("גם מודל הגיבוי נכשל: %s", str(exc)[:300])
         return None
@@ -627,13 +680,19 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 return reply
             return "לא הבנתי. תוכל לנסח אחרת?"
 
-        messages.append(choice)
+        messages.append(_clean_assistant(choice))
 
-        for call in tool_calls:
+        for idx, call in enumerate(tool_calls):
             name = call["function"]["name"]
+            call_id = call.get("id") or f"call_{idx}"   # זהה ל-_clean_assistant
             try:
                 args = json.loads(call["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
+                args = {}
+            if isinstance(args, dict):
+                # null בפרמטר רשות = "לא נמסר"
+                args = {k: v for k, v in args.items() if v is not None}
+            else:
                 args = {}
 
             # --- שחזור: שולפים את הפעולה הקודמת ומציעים אותה שוב ---
@@ -665,7 +724,7 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
                 })
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": call.get("id", name),
+                    "tool_call_id": call_id,
                     "name": name,
                     "content": ("הפריט נוסף לרשימת האישור. אל תשאל שוב "
                                 "עליו. אם נשארו פריטים נוספים בבקשה — "
@@ -686,7 +745,7 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": call.get("id", name),
+                "tool_call_id": call_id,
                 "name": name,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
