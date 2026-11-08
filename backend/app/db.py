@@ -112,6 +112,18 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS shopping (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    item TEXT NOT NULL,
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS email_seen (
+    message_id TEXT PRIMARY KEY,
+    seen_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_prompts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     INTEGER NOT NULL,
@@ -688,3 +700,45 @@ def portfolio_history(limit: int = 30) -> list[dict]:
             "SELECT * FROM portfolio_snapshots ORDER BY snap_date DESC LIMIT ?",
             (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------- רשימת קניות
+
+def shopping_add(chat_id: int, item: str) -> None:
+    with get_conn() as conn:
+        conn.execute("INSERT INTO shopping (chat_id, item) VALUES (?, ?)",
+                     (chat_id, item))
+
+
+def shopping_remove(chat_id: int, item: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM shopping WHERE chat_id = ? AND id = ("
+            "SELECT id FROM shopping WHERE chat_id = ? AND item LIKE ? LIMIT 1)",
+            (chat_id, chat_id, f"%{item}%"))
+        return cur.rowcount > 0
+
+
+def shopping_list(chat_id: int) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT item FROM shopping WHERE chat_id = ? ORDER BY id",
+            (chat_id,)).fetchall()
+        return [r["item"] for r in rows]
+
+
+def shopping_clear(chat_id: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM shopping WHERE chat_id = ?", (chat_id,))
+        return cur.rowcount
+
+
+# ------------------------------------------------------------- טריאז' מייל
+
+def email_mark_seen(message_id: str) -> bool:
+    """True אם המייל חדש (טרם נסרק)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO email_seen (message_id) VALUES (?)",
+            (message_id,))
+        return cur.rowcount > 0

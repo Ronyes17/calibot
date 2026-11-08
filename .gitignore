@@ -26,3 +26,5 @@ backups/
 nikol-bot-*.json
 vertex-sa.json
 *-sa.json
+
+deploy/

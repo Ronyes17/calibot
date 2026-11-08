@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from app import agent
 from app import db
-from app import websearch, habits as habits_mod, nutrition, ibkr, memfiles
+from app import websearch, habits as habits_mod, nutrition, ibkr, memfiles, gmail_sender
 from app.confirm import register_executor
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     agent.set_read_executor("portfolio", portfolio)
     agent.set_read_executor("read_notes", read_notes)
     agent.set_read_executor("read_journal", read_journal)
+    agent.set_read_executor("shopping", shopping)
     agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
     agent.set_read_executor("search_events", search_events)
@@ -83,6 +84,7 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     agent.set_read_executor("portfolio", portfolio)
     agent.set_read_executor("read_notes", read_notes)
     agent.set_read_executor("read_journal", read_journal)
+    agent.set_read_executor("shopping", shopping)
     agent.set_read_executor("forget_preference", forget_preference)
     agent.set_read_executor("meeting_stats", meeting_stats)
 
@@ -99,6 +101,19 @@ def _tz_name() -> str:
         return _calendar.get_user_timezone() or "Asia/Jerusalem"
     except Exception:
         return "Asia/Jerusalem"
+
+
+def _wall(value: str) -> str:
+    """
+    שעון קיר מקומי, בלי היסט. המודל מעתיק לפעמים +03:00 גם בשעון חורף,
+    וגוגל מכבד את ההיסט על פני timeZone — האירוע זז שעה. השעה שהמשתמש
+    אמר היא שעון קיר בישראל, אז זורקים את ההיסט ונותנים ל-timeZone להכריע.
+    """
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.replace(tzinfo=None).isoformat(timespec="seconds")
+    except Exception:
+        return value
 
 
 # ------------------------------------------------- כלי קריאה
@@ -251,8 +266,8 @@ async def _create_event(payload: dict) -> str:
     body = {
         "summary": payload["title"],
         "description": payload.get("description", ""),
-        "start": {"dateTime": payload["start"], "timeZone": tz},
-        "end": {"dateTime": payload["end"], "timeZone": tz},
+        "start": {"dateTime": _wall(payload["start"]), "timeZone": tz},
+        "end": {"dateTime": _wall(payload["end"]), "timeZone": tz},
     }
     if location:
         body["location"] = location
@@ -306,9 +321,9 @@ async def _update_event(payload: dict) -> str:
     if payload.get("location"):
         body["location"] = payload["location"]
     if payload.get("start"):
-        body["start"] = {"dateTime": payload["start"], "timeZone": tz}
+        body["start"] = {"dateTime": _wall(payload["start"]), "timeZone": tz}
     if payload.get("end"):
-        body["end"] = {"dateTime": payload["end"], "timeZone": tz}
+        body["end"] = {"dateTime": _wall(payload["end"]), "timeZone": tz}
 
     if not body:
         return "לא היה מה לעדכן."
@@ -587,3 +602,33 @@ async def _remove_habit(payload: dict) -> str:
 async def _save_note(payload: dict) -> str:
     name = memfiles.write_note(payload["topic"], payload["content"])
     return f"נשמר בפתק '{name}'."
+
+
+# ------------------------------------------------- קניות ומייל
+
+async def shopping(action: str, item: str = None) -> str:
+    if action == "add" and item:
+        db.shopping_add(_owner_chat_id, item.strip())
+        items = db.shopping_list(_owner_chat_id)
+        return f"הוספתי. ברשימה ({len(items)}): " + ", ".join(items)
+    if action == "remove" and item:
+        ok = db.shopping_remove(_owner_chat_id, item.strip())
+        return "הורדתי מהרשימה." if ok else f"לא מצאתי '{item}' ברשימה."
+    if action == "clear":
+        n = db.shopping_clear(_owner_chat_id)
+        return f"הרשימה נוקתה ({n} פריטים)."
+    items = db.shopping_list(_owner_chat_id)
+    if not items:
+        return "רשימת הקניות ריקה."
+    return "🛒 רשימת הקניות:\n" + "\n".join(f"• {i}" for i in items)
+
+
+@register_executor("send_email")
+async def _send_email(payload: dict) -> str:
+    ok = await gmail_sender.send(payload["to"], payload["subject"], payload["body"])
+    return f"המייל נשלח אל {payload['to']}." if ok else "השליחה נכשלה — בדוק את הלוג."
+
+
+@register_executor("reply_email")
+async def _reply_email(payload: dict) -> str:
+    return await gmail_sender.send_reply(payload["email_id"], payload["body"])

@@ -18,6 +18,7 @@ Drive מחייבת אישור מחדש של החשבון. אפשר, אבל זה 
 """
 
 import gzip
+import tarfile
 import logging
 import os
 import shutil
@@ -78,8 +79,15 @@ def rotate() -> int:
     """משאיר את KEEP_LOCAL האחרונים. מחזיר כמה נמחקו."""
     if not BACKUP_DIR.exists():
         return 0
-    files = sorted(BACKUP_DIR.glob("assistant-*.db.gz"),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = 0
+    for pattern in ("assistant-*.db.gz", "memory-*.tar.gz"):
+        files = sorted(BACKUP_DIR.glob(pattern),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        removed += _rotate_files(files)
+    return removed
+
+
+def _rotate_files(files) -> int:
     removed = 0
     for old in files[KEEP_LOCAL:]:
         try:
@@ -108,7 +116,8 @@ async def upload(path: Path) -> bool:
                     f"https://api.telegram.org/bot{TELEGRAM_API_TOKEN}/sendDocument",
                     data={
                         "chat_id": str(BACKUP_CHAT_ID),
-                        "caption": f"גיבוי {datetime.now(TZ):%d/%m/%Y}",
+                        "caption": ("גיבוי זיכרון " if "memory" in path.name
+                                    else "גיבוי ") + f"{datetime.now(TZ):%d/%m/%Y}",
                         "disable_notification": "true",
                     },
                     files={"document": (path.name, fh, "application/gzip")},
@@ -123,12 +132,37 @@ async def upload(path: Path) -> bool:
         return False
 
 
+def create_memory_snapshot() -> Optional[Path]:
+    """אורז את תיקיית הזיכרון (יומן ופתקים) ל-tar.gz. None אם ריקה/חסרה."""
+    from app import memfiles
+    mem_dir = Path(memfiles.MEMORY_DIR)
+    if not mem_dir.exists() or not any(mem_dir.rglob("*.md")):
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+    packed = BACKUP_DIR / f"memory-{stamp}.tar.gz"
+    try:
+        with tarfile.open(packed, "w:gz") as tar:
+            tar.add(mem_dir, arcname="memory")
+        logger.info("גיבוי זיכרון נוצר: %s (%s בייטים)", packed.name,
+                    packed.stat().st_size)
+        return packed
+    except Exception as exc:
+        logger.error("גיבוי הזיכרון נכשל: %s", exc)
+        packed.unlink(missing_ok=True)
+        return None
+
+
 async def daily_backup() -> None:
     """ג'וב מתוזמן. שקט בהצלחה, רועש בכישלון."""
     snapshot = create_snapshot()
-    if snapshot is None:
-        return
-    await upload(snapshot)
+    if snapshot is not None:
+        await upload(snapshot)
+
+    mem_snapshot = create_memory_snapshot()
+    if mem_snapshot is not None:
+        await upload(mem_snapshot)
+
     removed = rotate()
     if removed:
         logger.info("נמחקו %s גיבויים ישנים", removed)

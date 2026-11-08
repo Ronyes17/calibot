@@ -32,7 +32,7 @@ TZ = ZoneInfo("Asia/Jerusalem")
 # גיאוגרפית מ-IP של דאטהסנטרים (נכון לאוגוסט 2026).
 # החלפת מודל = שינוי LLM_MODEL ב-.env והפעלה מחדש, בלי לגעת בקוד.
 MODEL = os.getenv("LLM_MODEL", "groq/openai/gpt-oss-120b")
-MAX_ROUNDS = 5
+MAX_ROUNDS = 15
 
 WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
 
@@ -43,13 +43,14 @@ READ_TOOLS = {"query_events", "list_tasks", "search_events", "meeting_stats",
               "web_search", "search_knowledge", "list_scheduled",
               "check_email", "workout_stats",
               "log_habit", "habits_status", "log_meal", "nutrition_today",
-              "portfolio", "read_notes", "read_journal"}
+              "portfolio", "read_notes", "read_journal", "shopping"}
 
 # כלים שמשנים משהו ולכן עוברים דרך אישור
 WRITE_TOOLS = {"create_event", "update_event", "delete_event",
                "add_task", "complete_task", "log_activity",
                "schedule_prompt", "cancel_scheduled",
-               "add_habit", "remove_habit", "save_note"}
+               "add_habit", "remove_habit", "save_note",
+               "send_email", "reply_email"}
 
 # מטופל בנפרד: הוא לא פעולה חדשה אלא הצעה מחדש של פעולה קיימת
 RESTORE_TOOL = "restore_last"
@@ -261,6 +262,33 @@ TOOLS = [
         }},
     }},
     {"type": "function", "function": {
+        "name": "shopping",
+        "description": ("רשימת הקניות. action: add/remove/show/clear. "
+                        "'תוסיפי חלב' -> add. מבוצע מיד."),
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["add", "remove", "show", "clear"]},
+            "item": {"type": "string", "description": "הפריט (ל-add/remove)"},
+        }, "required": ["action"]},
+    }},
+    {"type": "function", "function": {
+        "name": "send_email",
+        "description": "שליחת מייל חדש. דורש אישור לפני שליחה.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "כתובת מייל"},
+            "subject": {"type": "string"},
+            "body": {"type": "string", "description": "גוף המייל, בשפת המקור של הנמען"},
+        }, "required": ["to", "subject", "body"]},
+    }},
+    {"type": "function", "function": {
+        "name": "reply_email",
+        "description": ("תשובה למייל נכנס לפי id מ-check_email. "
+                        "דורש אישור לפני שליחה."),
+        "parameters": {"type": "object", "properties": {
+            "email_id": {"type": "string", "description": "ה-id מתוצאות check_email"},
+            "body": {"type": "string"},
+        }, "required": ["email_id", "body"]},
+    }},
+    {"type": "function", "function": {
         "name": "remember_preference",
         "description": ("שמירת העדפה קבועה של רון. כשהוא אומר 'תמיד', "
                         "'מעכשיו', 'כל פעם' — למשל 'אימון זה תמיד שעה וחצי'. "
@@ -423,6 +451,19 @@ async def _departure_line(args: dict) -> str:
         return ""
 
 
+def _dedupe(proposals: list[dict]) -> list[dict]:
+    """סבב השלמה עלול להציע שוב אירוע שכבר נוסף — אותה כותרת ואותה התחלה."""
+    seen, out = set(), []
+    for p in proposals:
+        a = p.get("payload") or {}
+        key = (p["action_type"], a.get("title"), str(a.get("start", ""))[:16])
+        if p["action_type"] == "create_event" and key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
 async def _call_llm(messages: list) -> Optional[dict]:
     """
     קריאה למודל עם ניסיון חוזר אחד על מגבלת קצב.
@@ -434,7 +475,7 @@ async def _call_llm(messages: list) -> Optional[dict]:
         try:
             return await acompletion(
                 model=MODEL, messages=messages, tools=TOOLS,
-                tool_choice="auto", max_tokens=800,
+                tool_choice="auto", max_tokens=4096,
             )
         except Exception as exc:
             if "RateLimit" in type(exc).__name__ and attempt == 1:
@@ -460,6 +501,12 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
 
     proposals: list[dict] = []   # נאספים במהלך התור, נשלחים כמקשה אחת בסוף
 
+    # תמונה עם רשימה: vision כותב "סה"כ N אירועים". אם המודל עצר לפני N,
+    # מחזירים אותו להשלים את החסרים — במקום לשלוח אישור חלקי בשקט.
+    m = re.search(r'סה"כ\s*(\d+)', text)
+    expected = int(m.group(1)) if m else 0
+    nudges = 0
+
     for _ in range(MAX_ROUNDS):
         response = await _call_llm(messages)
         if response is None:
@@ -471,8 +518,19 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
 
         if not tool_calls:
             reply = (choice.get("content") or "").strip()
+            created = sum(1 for p in proposals if p["action_type"] == "create_event")
+            if expected and created < expected and nudges < 2:
+                nudges += 1
+                logger.info("נוצרו %s מתוך %s אירועים — מבקש השלמה", created, expected)
+                messages.append({"role": "assistant", "content": reply or ""})
+                messages.append({"role": "user", "content": (
+                    f"נוספו {created} מתוך {expected} האירועים שברשימה. עבור שוב "
+                    "על הרשימה הממוספרת, מצא את האירועים שעוד לא נוספו, וקרא "
+                    "ל-create_event רק עבורם. אל תוסיף שוב אירוע שכבר נוסף."
+                )})
+                continue
             if proposals:
-                await confirm.propose_batch(chat_id, proposals)
+                await confirm.propose_batch(chat_id, _dedupe(proposals))
                 # טקסט חופשי מהמודל מיותר לצד הודעת האישור
                 return None
             if reply:
@@ -545,6 +603,6 @@ async def handle_message(chat_id: int, text: str) -> Optional[str]:
             })
 
     if proposals:
-        await confirm.propose_batch(chat_id, proposals)
+        await confirm.propose_batch(chat_id, _dedupe(proposals))
         return None
     return "הסתבכתי עם הבקשה הזו. תוכל לפרק אותה לשני חלקים?"

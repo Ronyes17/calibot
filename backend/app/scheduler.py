@@ -29,7 +29,7 @@ from app import backup
 from app import gmail_reader
 from app import policy
 from app import weather
-from app import db
+from app import db, habits, nutrition, ibkr, memfiles, confirm, gmail_sender
 from app import weather
 from app import travel
 
@@ -117,6 +117,21 @@ async def morning_brief() -> None:
     forecast = await weather.today_line()
     if forecast:
         lines.append(forecast)
+
+    try:
+        port_line = ibkr.brief_line()
+        if port_line:
+            lines.append(port_line)
+    except Exception as exc:
+        logger.warning("שורת תיק לבריף נכשלה: %s", exc)
+
+    try:
+        habit_line = habits.brief_line(_deps.chat_id)
+        if habit_line:
+            lines.append(habit_line)
+    except Exception as exc:
+        logger.warning("שורת הרגלים לבריף נכשלה: %s", exc)
+
     lines.append("")
 
     if events:
@@ -218,6 +233,71 @@ async def morning_brief() -> None:
 
 # ------------------------------------------------------- סיכום ערב
 
+# EMAIL_AUTOPILOT=1 ב-.env: תשובות בטוחות נשלחות מיד עם דיווח אחרי מעשה
+# (כמו סוכן מכירות). ברירת מחדל 0: כל תשובה מחכה לאישור עם כפתורים.
+def _autopilot() -> bool:
+    return os.getenv("EMAIL_AUTOPILOT", "0") == "1"
+
+
+async def email_triage() -> None:
+    """
+    סורק מיילים חדשים ומחליט: תשובה (אוטומטית או עם אישור, לפי
+    EMAIL_AUTOPILOT), התראה, או כלום.
+    """
+    if _deps is None:
+        return
+    emails = await gmail_reader.unread_recent(limit=6)
+    fresh = [m for m in emails if db.email_mark_seen(m["id"])]
+    if not fresh:
+        return
+
+    from app import agent as _agent
+    for m in fresh:
+        full = await gmail_reader.read_full(m["id"]) or {}
+        body = (full.get("body") or m["snippet"])[:1500]
+        prompt = (
+            "מייל נכנס אל רון:\n"
+            f"מאת: {m['from_addr']}\nנושא: {m['subject']}\nגוף:\n{body}\n\n"
+            "החלט מה לעשות והחזר JSON בלבד:\n"
+            '{"action": "reply", "draft": "טיוטת תשובה קצרה ומנומסת בשפת המייל"}\n'
+            'או {"action": "notify", "reason": "למה רון צריך לראות את זה"}\n'
+            'או {"action": "ignore"}\n'
+            "reply רק כשהתשובה ברורה ובטוחה (אישור הגעה, תיאום פשוט, תודה). "
+            "כל דבר אישי, כספי או לא ודאי -> notify. ספאם/אוטומטי -> ignore."
+        )
+        try:
+            resp = await _agent._call_llm([{"role": "user", "content": prompt}])
+            raw = resp["choices"][0]["message"]["content"] or ""
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            import json as _json
+            decision = _json.loads(raw)
+        except Exception as exc:
+            logger.warning("טריאז' נכשל עבור %s: %s", m["subject"][:40], exc)
+            continue
+
+        action = decision.get("action")
+        if action == "reply" and decision.get("draft"):
+            if _autopilot():
+                result = await gmail_sender.send_reply(m["id"], decision["draft"])
+                await _deps.send(
+                    _deps.chat_id,
+                    (f'📧✈️ עניתי במקומך למייל מ{m["from"]}: "{m["subject"]}"\n'
+                     f'---\n{decision["draft"][:400]}\n---\n{result}'))
+            else:
+                await confirm.propose(
+                    _deps.chat_id, "reply_email",
+                    {"email_id": m["id"], "body": decision["draft"]},
+                    (f'📧 מייל מ{m["from"]}: "{m["subject"]}"\n'
+                     f'ניסחתי תשובה — לשלוח?\n---\n{decision["draft"][:400]}'),
+                )
+        elif action == "notify":
+            reason = decision.get("reason", "")
+            await _deps.send(
+                _deps.chat_id,
+                f'📧 מייל שכדאי שתראה — מ{m["from"]}: "{m["subject"]}"\n'
+                f'{reason}\n(אם תרצה שאענה — תגיד לי מה לכתוב)')
+
+
 async def evening_review() -> None:
     if _deps is None:
         return
@@ -256,6 +336,36 @@ async def evening_review() -> None:
     if warnings:
         lines.append("")
         lines.extend(warnings)
+
+    try:
+        h_lines = habits.evening_lines(_deps.chat_id)
+        if h_lines:
+            lines.append("")
+            lines.extend(h_lines)
+    except Exception as exc:
+        logger.warning("הרגלים בסיכום ערב נכשלו: %s", exc)
+
+    try:
+        food = nutrition.day_summary(_deps.chat_id)
+        if food:
+            lines.append("\n" + food.splitlines()[0])
+    except Exception as exc:
+        logger.warning("תזונה בסיכום ערב נכשלה: %s", exc)
+
+    # תמצית היום נכתבת ליומן הקבצים — הזיכרון נבנה גם בלי שתענה
+    try:
+        done_habits = [r["name"] for r in habits.status(_deps.chat_id) if r["done_today"]]
+        kcal, protein = nutrition.totals(
+            _deps.chat_id, datetime.now(TZ).strftime("%Y-%m-%d"))
+        digest = []
+        if done_habits:
+            digest.append("הרגלים: " + ", ".join(done_habits))
+        if kcal:
+            digest.append(f"תזונה: ~{kcal} קק\"ל / ~{protein}g חלבון")
+        if digest:
+            memfiles.append_journal("סיכום יומי — " + " · ".join(digest))
+    except Exception as exc:
+        logger.warning("תמצית ליומן נכשלה: %s", exc)
 
     # התשובה שלך נקלטת דרך הכלי log_activity של המודל —
     # אין כאן מכונת מצבים נפרדת שצריך לתחזק.
@@ -332,6 +442,23 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
     _deps = deps
 
     scheduler = AsyncIOScheduler(timezone=TZ)
+
+    if ibkr.configured():
+        # רבע שעה לפני הבריף, כדי שהשורה בבריף תהיה טרייה
+        ib_minute = MORNING_MINUTE - 20
+        ib_hour = MORNING_HOUR
+        if ib_minute < 0:
+            ib_minute += 60
+            ib_hour = (MORNING_HOUR - 1) % 24
+        scheduler.add_job(
+            ibkr.refresh, CronTrigger(hour=ib_hour, minute=ib_minute),
+            id="ibkr_refresh", coalesce=True, misfire_grace_time=3600,
+        )
+
+    scheduler.add_job(
+        email_triage, CronTrigger(hour="8-22/2", minute=10),
+        id="email_triage", coalesce=True, misfire_grace_time=1800,
+    )
 
     scheduler.add_job(
         morning_brief, CronTrigger(hour=MORNING_HOUR, minute=MORNING_MINUTE),

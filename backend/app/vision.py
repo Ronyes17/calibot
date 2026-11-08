@@ -41,7 +41,9 @@ EXTRACT_PROMPT = (
     "צילום מסך של התכתבות וכדומה.\n"
     "חלץ ממנה את פרטי האירוע בעברית, בשורות קצרות: מה האירוע, "
     "תאריך, שעה, מיקום, וכל פרט רלוונטי אחר (רופא, אסמכתא).\n"
-    "אם יש כמה אירועים — פרט את כולם.\n"
+    "אם יש כמה אירועים (רשימת שיעורים, מערכת, משמרות) — כתוב קודם "
+    "'סה\"כ N אירועים', ואז שורה ממוספרת לכל אחד, כולל כל שורה בטבלה. "
+    "אל תדלג ואל תסכם — עבור על התמונה שורה אחרי שורה.\n"
     "אם אין בתמונה שום פרט של אירוע, החזר בדיוק: אין אירוע\n"
     "החזר רק את הפרטים, בלי הקדמות."
 )
@@ -133,7 +135,7 @@ async def _vertex_generate(image: bytes, prompt: str) -> Optional[str]:
                 }},
             ],
         }],
-        "generationConfig": {"temperature": 0.0},
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
     }
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -206,6 +208,7 @@ async def analyze_photo(message: dict):
         return None, None, "לא הצלחתי לקרוא את התמונה. תוכל לכתוב את הפרטים?"
     if not text or "אין אירוע" in text:
         return None, None, "לא מצאתי בתמונה אירוע או אוכל. מה רצית שאעשה איתה?"
+    logger.info("חילוץ מתמונה:\n%s", text[:3000])
     prefix = f"{caption}\n" if caption else ""
     return "schedule", (f"{prefix}מהתמונה שצירפתי:\n{text}\n\nתציע מה לקבוע לפי זה."), None
 
