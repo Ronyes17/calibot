@@ -127,10 +127,11 @@ async def fetch_events(start: datetime, end: datetime) -> list[dict]:
     if service is None:
         return []
 
+    # מחרוזת מהמודל = שעון קיר בישראל; ההיסט שלו לא אמין (קיץ/חורף)
     if isinstance(start, str):
-        start = datetime.fromisoformat(start)
+        start = datetime.fromisoformat(_wall(start))
     if isinstance(end, str):
-        end = datetime.fromisoformat(end)
+        end = datetime.fromisoformat(_wall(end))
     if start.tzinfo is None:
         start = start.replace(tzinfo=TZ)
     if end.tzinfo is None:

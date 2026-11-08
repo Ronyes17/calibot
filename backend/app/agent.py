@@ -404,14 +404,20 @@ def _summarize(name: str, args: dict) -> str:
     return "לבצע את הפעולה?"
 
 
+def _local(value) -> datetime:
+    """שעון קיר בישראל. ההיסט שהמודל כותב (לפעמים +03:00 בחורף) נזרק."""
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt.replace(tzinfo=TZ)
+
+
 async def _conflicts_for(args: dict) -> list:
     """בדיקת התנגשויות לפני שמציגים הצעה לאירוע חדש."""
     fetch = _read_executors.get("query_events")
     if fetch is None:
         return []
     try:
-        start = datetime.fromisoformat(args["start"])
-        end = datetime.fromisoformat(args["end"])
+        start = _local(args["start"])
+        end = _local(args["end"])
         day_start = start.astimezone(TZ).replace(hour=0, minute=0, second=0,
                                                  microsecond=0)
         events = await fetch(day_start, day_start + timedelta(days=1))
@@ -434,7 +440,7 @@ async def _departure_line(args: dict) -> str:
     if fetch is None:
         return ""
     try:
-        start = datetime.fromisoformat(args["start"])
+        start = _local(args["start"])
         day_start = start.astimezone(TZ).replace(hour=0, minute=0, second=0,
                                                  microsecond=0)
         events = await fetch(day_start, day_start + timedelta(days=1))
