@@ -144,14 +144,15 @@ async def _download_photo(file_id: str) -> Optional[bytes]:
 
 
 async def vertex_call(parts: list, max_tokens: int = 8192,
-                      timeout: float = 60.0, extra_config: dict = None) -> Optional[str]:
+                      timeout: float = 60.0, extra_config: dict = None,
+                      model: str = "") -> Optional[str]:
     """
     קריאה כללית ל-Gemini ב-Vertex עם רשימת parts (טקסט, תמונה, וידאו
     מ-YouTube וכו'). משמשת גם את features.py. None בכשל.
     """
     if GEMINI_API_KEY:
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{FREE_MODEL}:generateContent")
+               f"{model or FREE_MODEL}:generateContent")
         headers = {"x-goog-api-key": GEMINI_API_KEY}
     else:
         token = await asyncio.to_thread(_fresh_token_sync)
