@@ -116,20 +116,40 @@ def _to_mp3(audio: bytes) -> Optional[bytes]:
         return None
 
 
-async def _gemini_transcribe(audio: bytes) -> Optional[str]:
-    """גיבוי אחרון: תמלול ב-Gemini (Vertex), אותו חשבון שירות של התמונות."""
+# מודלים לתמלול, מהמדויק לזמין: Flash הרגיל מבין עברית מדוברת הרבה יותר
+# טוב מ-Flash Lite, אבל המכסה החינמית שלו קטנה — כשהיא נגמרת עוברים הלאה.
+TRANSCRIBE_MODELS = [m.strip() for m in os.getenv(
+    "TRANSCRIBE_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
+).split(",") if m.strip()]
+
+GEMINI_TRANSCRIBE_PROMPT = (
+    "זו הודעה קולית בעברית מדוברת (לפעמים עם מילים באנגלית) שרון שולח לעוזרת "
+    "האישית שלו, ניקול. תמלל אותה מילה במילה, בדיוק כפי שנאמרה, בכתיב עברי "
+    "תקין. נושאים נפוצים: יומן, פגישות, תורים, משימות, תזכורות, מיילים, "
+    "קניות, הרגלים, אוכל, השקעות. שמות של אנשים ומקומות כתוב כפי שהם נשמעים. "
+    "אל תתרגם, אל תסכם ואל תענה על התוכן. החזר רק את התמלול."
+)
+
+
+async def _gemini_transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
+    """תמלול ב-Gemini החינמי (AI Studio), עם מעבר בין מודלים כשמכסה נגמרת."""
     try:
         import base64
         from app import vision
         if vision._load_credentials() is None:
             return None
-        text = await vision.vertex_call([
-            {"text": "תמלל את ההקלטה מילה במילה, בשפה שבה מדברים (בדרך כלל "
-                     "עברית). החזר רק את התמלול, בלי הקדמות."},
-            {"inline_data": {"mime_type": "audio/mp3",
-                             "data": base64.b64encode(audio).decode("ascii")}},
-        ], max_tokens=4096, timeout=120)
-        return (text or "").strip() or None
+        data = base64.b64encode(audio).decode("ascii")
+        for model in TRANSCRIBE_MODELS:
+            text = await vision.vertex_call([
+                {"text": GEMINI_TRANSCRIBE_PROMPT},
+                {"inline_data": {"mime_type": mime, "data": data}},
+            ], max_tokens=4096, timeout=60, model=model)
+            text = (text or "").strip()
+            if text:
+                logger.info("תמלול ב-%s", model)
+                return text
+            logger.warning("תמלול ב-%s נכשל: %s", model, (vision.last_error or "")[:200])
+        return None
     except Exception as exc:
         logger.warning("תמלול Gemini נכשל: %s", exc)
         return None
@@ -163,7 +183,8 @@ async def transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
         errors.append("Groq לא זמין כרגע" if GROQ_API_KEY else "GROQ_API_KEY חסר")
         mp3 = await asyncio.to_thread(_to_mp3, audio) or audio
 
-    text = await _gemini_transcribe(mp3)
+    # הקובץ המקורי (ogg מטלגרם) — בלי איבוד איכות של המרה
+    text = await _gemini_transcribe(audio, mime if "ogg" in mime else "audio/mpeg")
     if text:
         logger.warning("תמלול הצליח רק ב-Gemini. שגיאות Groq: %s", " | ".join(errors))
         return text
