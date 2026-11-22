@@ -114,8 +114,19 @@ async def oauth_callback(request: Request):
     return await calendar_service.handle_oauth_callback(request)
 
 
+from collections import deque
+_seen_updates: deque = deque(maxlen=500)
+
+
 @router.post("/webhook")
 async def telegram_webhook(update: TelegramUpdate):
+    # טלגרם שולח שוב עדכון שלא נענה מהר. בלי זה הודעה קולית איטית
+    # טופלה פעמיים (שני תמלולים, שתי תשובות).
+    uid = getattr(update, "update_id", None)
+    if uid is not None:
+        if uid in _seen_updates:
+            return {"status": "ok"}
+        _seen_updates.append(uid)
     # --- 2. לחיצה על כפתור ---
     if getattr(update, "callback_query", None):
         chat_id = update.callback_query["message"]["chat"]["id"]
