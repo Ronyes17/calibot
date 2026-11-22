@@ -53,6 +53,44 @@ async def dashboard_view(key: str = "", view: str = "today"):
     return HTMLResponse(html_out)
 
 
+_LEGAL_STYLE = ("<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<style>body{font-family:system-ui,sans-serif;max-width:640px;"
+                "margin:40px auto;padding:0 16px;line-height:1.6}</style>")
+
+
+@router.get("/privacy")
+async def privacy_page():
+    """מדיניות פרטיות — נדרשת לפרסום אפליקציית OAuth בגוגל."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Nikol - Privacy Policy</title>{_LEGAL_STYLE}</head><body>
+<h1>Nikol - Privacy Policy</h1>
+<p>Nikol is a private personal assistant operated by Ron Yeshayahu for his own use only.
+It is not offered to the public.</p>
+<p><b>Data accessed.</b> With the owner's explicit consent, Nikol accesses the owner's
+Google Calendar, Gmail and Google Drive/Sheets to read and manage events, read and send
+email, and read or update files the owner asks about.</p>
+<p><b>Use.</b> Data is used only to provide assistant features to the owner. It is not
+sold or shared with third parties for advertising. Content may be processed by AI service
+providers (such as Google Gemini) solely to generate responses.</p>
+<p><b>Storage.</b> Data is stored on the owner's private server and deleted on request.
+Access can be revoked at any time at https://myaccount.google.com/permissions.</p>
+<p>Use of Google API data complies with the Google API Services User Data Policy,
+including the Limited Use requirements.</p>
+<p>Contact: ronnoy17@gmail.com</p></body></html>""")
+
+
+@router.get("/terms")
+async def terms_page():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Nikol - Terms of Service</title>{_LEGAL_STYLE}</head><body>
+<h1>Nikol - Terms of Service</h1>
+<p>Nikol is a private personal assistant used solely by its owner, Ron Yeshayahu.
+No service is offered to other users. The software is provided as-is, without warranty.</p>
+<p>Contact: ronnoy17@gmail.com</p></body></html>""")
+
+
 @router.get("/dashboard/manifest.webmanifest")
 async def dashboard_manifest(key: str = ""):
     """מאפשר 'הוספה למסך הבית' — הדאשבורד נפתח כאפליקציה במסך מלא."""
