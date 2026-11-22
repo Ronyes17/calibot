@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, Request
 
 from app import agent
 from app import confirm
@@ -157,7 +157,11 @@ _seen_updates: deque = deque(maxlen=500)
 
 
 @router.post("/webhook")
-async def telegram_webhook(update: TelegramUpdate):
+async def telegram_webhook(update: TelegramUpdate,
+                           x_telegram_bot_api_secret_token: str = Header(default="")):
+    if not policy.webhook_ok(x_telegram_bot_api_secret_token):
+        logger.warning("וובהוק נדחה: סוד חסר או שגוי")
+        return {"status": "ok"}
     # טלגרם שולח שוב עדכון שלא נענה מהר. בלי זה הודעה קולית איטית
     # טופלה פעמיים (שני תמלולים, שתי תשובות).
     uid = getattr(update, "update_id", None)

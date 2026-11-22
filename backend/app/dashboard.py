@@ -19,7 +19,8 @@ DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
 
 
 def token_ok(key: str) -> bool:
-    return bool(DASHBOARD_TOKEN) and key == DASHBOARD_TOKEN
+    import hmac
+    return bool(DASHBOARD_TOKEN) and hmac.compare_digest(str(key or ""), DASHBOARD_TOKEN)
 
 
 def _esc(s) -> str:

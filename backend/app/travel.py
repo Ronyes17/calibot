@@ -26,7 +26,7 @@ ORS_API_KEY = os.getenv("ORS_API_KEY")
 ORS_BASE = "https://api.openrouteservice.org"
 
 # מיקום ברירת מחדל כשלאירוע הקודם אין מיקום רשום
-HOME_ADDRESS = os.getenv("HOME_ADDRESS", "גיבורי הקריה 9, קרית אתא")
+HOME_ADDRESS = os.getenv("HOME_ADDRESS", "")   # רק מ-.env — לא בקוד
 
 # עיגון ידני של הבית: "lat,lon" מגוגל מפות. עוקף את הגיאוקודר לגמרי
 # עבור הבית — הכתובת הכי חשובה והכי רגישה לפענוח שגוי.

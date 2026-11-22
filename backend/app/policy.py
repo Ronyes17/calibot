@@ -28,6 +28,25 @@ def _parse_ids(raw: str) -> set[int]:
 ALLOWED_CHAT_IDS = _parse_ids(os.getenv("ALLOWED_CHAT_IDS", ""))
 
 
+def webhook_secret() -> str:
+    """
+    סוד שטלגרם שולח בכותרת X-Telegram-Bot-Api-Secret-Token.
+    נגזר מטוקן הבוט (או WEBHOOK_SECRET ב-.env) — בלי זה כל אחד שמכיר את
+    ה-chat_id יכול לזייף עדכון ולתת לניקול פקודות.
+    """
+    import hashlib, hmac
+    explicit = os.getenv("WEBHOOK_SECRET", "")
+    if explicit:
+        return explicit
+    token = os.getenv("TELEGRAM_API_TOKEN", "")
+    return hmac.new(token.encode(), b"nikol-webhook", hashlib.sha256).hexdigest()[:48]
+
+
+def webhook_ok(header_value) -> bool:
+    import hmac
+    return bool(header_value) and hmac.compare_digest(str(header_value), webhook_secret())
+
+
 def is_allowed(chat_id: int) -> bool:
     """
     ברירת המחדל היא סגירה: רשימה ריקה חוסמת את כולם.

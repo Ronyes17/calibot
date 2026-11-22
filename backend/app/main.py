@@ -73,6 +73,8 @@ async def lifespan(app: FastAPI):
                 f"https://api.telegram.org/bot{TELEGRAM_API_TOKEN}/setWebhook",
                 params={
                     "url": f"{PUBLIC_URL}/webhook",
+                    # טלגרם מצרף את הסוד לכל עדכון; בלעדיו /webhook דוחה
+                    "secret_token": policy.webhook_secret(),
                     # בלי זה טלגרם לא שולח לחיצות על כפתורים
                     "allowed_updates": '["message","callback_query"]',
                 },
@@ -99,7 +101,21 @@ async def lifespan(app: FastAPI):
         )
 
 
-app = FastAPI(title="עוזר אישי", lifespan=lifespan)
+# בלי /docs, /redoc ו-/openapi.json — אין סיבה לחשוף מפת API לעולם
+app = FastAPI(title="עוזר אישי", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "no-referrer")   # הקישור הסודי לא דולף
+    h.setdefault("X-Robots-Tag", "noindex, nofollow")
+    h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
 app.include_router(router)
 
 

@@ -400,6 +400,25 @@ async def _summarize_youtube(url: str, focus_txt: str) -> str:
     return summary + "\n\n(נשמר בבסיס הידע)"
 
 
+def _public_url(url: str) -> bool:
+    """חוסם בקשות לשרת עצמו / לרשת פנימית (SSRF) דרך 'תסכמי את הקישור'."""
+    import ipaddress, socket
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    if not host or host == "localhost":
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
 def _html_to_text(raw: str) -> tuple[str, str]:
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
@@ -424,6 +443,8 @@ async def summarize_link(url: str, focus: str = "") -> str:
     url = (url or "").strip()
     if not url.startswith("http"):
         return "צריך קישור מלא שמתחיל ב-http."
+    if not await asyncio.to_thread(_public_url, url):
+        return "אני לא פותחת כתובות פנימיות או מקומיות."
     focus_txt = f", עם דגש על: {focus}" if focus else ""
 
     if YT.search(url):
@@ -439,9 +460,17 @@ async def summarize_link(url: str, focus: str = "") -> str:
                 "כמה דקות. אמור למשתמש בקצרה שזה בטיפול.")
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False,
                                      headers={"User-Agent": UA}) as client:
-            resp = await client.get(url)
+            # הפניות נבדקות ידנית — שהפניה לא תוביל לכתובת פנימית
+            for _ in range(5):
+                resp = await client.get(url)
+                if resp.is_redirect and resp.headers.get("location"):
+                    url = str(resp.url.join(resp.headers["location"]))
+                    if not await asyncio.to_thread(_public_url, url):
+                        return "הקישור מפנה לכתובת פנימית — לא פותחת."
+                    continue
+                break
             resp.raise_for_status()
             ctype = resp.headers.get("content-type", "")
             body = resp.content[:8 * 1024 * 1024]
