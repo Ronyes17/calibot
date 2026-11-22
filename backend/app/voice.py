@@ -119,8 +119,11 @@ def _to_mp3(audio: bytes) -> Optional[bytes]:
 # מודלים לתמלול, מהמדויק לזמין: Flash הרגיל מבין עברית מדוברת הרבה יותר
 # טוב מ-Flash Lite, אבל המכסה החינמית שלו קטנה — כשהיא נגמרת עוברים הלאה.
 TRANSCRIBE_MODELS = [m.strip() for m in os.getenv(
-    "TRANSCRIBE_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
+    "TRANSCRIBE_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
 ).split(",") if m.strip()]
+
+# מודל שלא עונה תוך זה — עוברים לבא. הודעה קולית קצרה מתומללת בשניות.
+TRANSCRIBE_MODEL_TIMEOUT = float(os.getenv("TRANSCRIBE_MODEL_TIMEOUT", "15"))
 
 GEMINI_TRANSCRIBE_PROMPT = (
     "זו הודעה קולית בעברית מדוברת (לפעמים עם מילים באנגלית) שרון שולח לעוזרת "
@@ -143,7 +146,7 @@ async def _gemini_transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[
             text = await vision.vertex_call([
                 {"text": GEMINI_TRANSCRIBE_PROMPT},
                 {"inline_data": {"mime_type": mime, "data": data}},
-            ], max_tokens=4096, timeout=60, model=model)
+            ], max_tokens=2048, timeout=TRANSCRIBE_MODEL_TIMEOUT, model=model)
             text = (text or "").strip()
             if text:
                 logger.info("תמלול ב-%s", model)
