@@ -226,9 +226,17 @@ async def render(chat_id: int, fetch_events=None, view: str = "today", key: str 
 
     return f"""<!doctype html>
 <html lang="he" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="refresh" content="300">
 <title>ניקול</title>
+<link rel="manifest" href="/dashboard/manifest.webmanifest?key={key}">
+<link rel="icon" type="image/png" href="/dashboard/icon.png">
+<link rel="apple-touch-icon" href="/dashboard/icon.png">
+<meta name="theme-color" content="#0E1026">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ניקול">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;600;800&display=swap" rel="stylesheet">
@@ -271,6 +279,9 @@ async def render(chat_id: int, fetch_events=None, view: str = "today", key: str 
   .chip.c3 b {{ color:var(--amber); }} .chip.c4 b {{ color:var(--up); }}
 
   main {{ max-width:680px; margin:0 auto; }}
+  /* אפליקציה במסך הבית: מרווח מהמגרעת ומפס הבית של הטלפון */
+  body {{ padding-top:max(env(safe-area-inset-top),clamp(14px,3vw,32px));
+          padding-bottom:calc(env(safe-area-inset-bottom) + 72px); }}
   .grid {{ display:grid; gap:12px; grid-template-columns:1fr; }}
   .card {{ background:var(--glass); border:1px solid var(--edge); border-radius:18px;
     padding:14px 17px; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }}
@@ -318,7 +329,7 @@ async def render(chat_id: int, fetch_events=None, view: str = "today", key: str 
   .dots i {{ width:9px; height:9px; border-radius:50%; display:block; }}
   .dots .don {{ background:var(--up); }}
   .dots .off {{ background:rgba(255,255,255,.12); }}
-  .talk {{ position:fixed; bottom:18px; inset-inline-start:18px; background:var(--sky);
+  .talk {{ position:fixed; bottom:calc(18px + env(safe-area-inset-bottom)); inset-inline-start:18px; background:var(--sky);
     color:#151329; border:none; cursor:pointer; border-radius:99px; padding:12px 20px;
     font-weight:700; font-size:.92rem; font-family:inherit; z-index:40;
     box-shadow:0 6px 20px rgba(125,211,252,.35); }}
@@ -328,7 +339,8 @@ async def render(chat_id: int, fetch_events=None, view: str = "today", key: str 
     backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
     transform:translateX(110%); transition:transform .28s ease; }}
   #np.open {{ transform:translateX(0); }}
-  #np header {{ display:flex; align-items:center; gap:10px; padding:14px 16px;
+  #np header {{ display:flex; align-items:center; gap:10px;
+    padding:calc(14px + env(safe-area-inset-top)) 16px 14px;
     border-bottom:1px solid var(--edge); font-weight:700; }}
   #np header .x {{ margin-inline-start:auto; background:none; border:none;
     color:var(--dim); font-size:1.25rem; cursor:pointer; }}
@@ -342,9 +354,10 @@ async def render(chat_id: int, fetch_events=None, view: str = "today", key: str 
     border-end-end-radius:4px; }}
   .m.wait i {{ animation:blink 1.2s infinite; }}
   @keyframes blink {{ 50% {{ opacity:.25; }} }}
-  #npform {{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--edge); }}
+  #npform {{ display:flex; gap:8px; padding:12px 14px calc(12px + env(safe-area-inset-bottom));
+    border-top:1px solid var(--edge); }}
   #npin {{ flex:1; background:var(--glass); border:1px solid var(--edge); color:var(--text);
-    border-radius:12px; padding:10px 13px; font-family:inherit; font-size:.92rem; }}
+    border-radius:12px; padding:10px 13px; font-family:inherit; font-size:16px; }}
   #npin:focus {{ outline:2px solid var(--sky); outline-offset:1px; }}
   #npsend {{ background:var(--sky); color:#151329; border:none; border-radius:12px;
     padding:0 18px; font-weight:700; font-family:inherit; cursor:pointer; }}

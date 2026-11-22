@@ -84,9 +84,20 @@ _credentials = None
 _project_id: Optional[str] = None
 
 
+# Gemini API החינמי (AI Studio). כשיש מפתח — משתמשים בו במקום Vertex.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+FREE_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
+_FREE_MARK = object()
+
+
 def _load_credentials():
-    """טעינת חשבון השירות פעם אחת; רענון טוקן לפי הצורך."""
+    """
+    מחזיר משהו לא-None כשיש גישה ל-Gemini: מפתח AI Studio (חינמי, מועדף)
+    או חשבון שירות של Vertex.
+    """
     global _credentials, _project_id
+    if GEMINI_API_KEY:
+        return _FREE_MARK
     if _credentials is None:
         if not SA_FILE or not os.path.exists(SA_FILE):
             return None
@@ -138,12 +149,18 @@ async def vertex_call(parts: list, max_tokens: int = 8192,
     קריאה כללית ל-Gemini ב-Vertex עם רשימת parts (טקסט, תמונה, וידאו
     מ-YouTube וכו'). משמשת גם את features.py. None בכשל.
     """
-    token = await asyncio.to_thread(_fresh_token_sync)
-    if token is None:
-        return None
-    url = (f"https://{REGION}-aiplatform.googleapis.com/v1/projects/"
-           f"{_project_id}/locations/{REGION}/publishers/google/models/"
-           f"{MODEL}:generateContent")
+    if GEMINI_API_KEY:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{FREE_MODEL}:generateContent")
+        headers = {"x-goog-api-key": GEMINI_API_KEY}
+    else:
+        token = await asyncio.to_thread(_fresh_token_sync)
+        if token is None:
+            return None
+        url = (f"https://{REGION}-aiplatform.googleapis.com/v1/projects/"
+               f"{_project_id}/locations/{REGION}/publishers/google/models/"
+               f"{MODEL}:generateContent")
+        headers = {"Authorization": f"Bearer {token}"}
     body = {
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": max_tokens,
@@ -151,8 +168,7 @@ async def vertex_call(parts: list, max_tokens: int = 8192,
     }
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                url, headers={"Authorization": f"Bearer {token}"}, json=body)
+            resp = await client.post(url, headers=headers, json=body)
             if resp.status_code >= 400:
                 # גוף השגיאה של גוגל מסביר למה (וידאו ארוך מדי, פרטי וכו')
                 logger.error("Vertex %s: %s", resp.status_code, resp.text[:800])

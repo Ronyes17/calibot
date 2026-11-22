@@ -35,10 +35,13 @@ MODEL = os.getenv("LLM_MODEL", "groq/openai/gpt-oss-120b")
 
 # מודל גיבוי: כש-Groq עמוס/נופל עוברים ל-Gemini ב-Vertex, עם חשבון השירות
 # שכבר משמש לתמונות. ריק ב-.env (FALLBACK_MODEL=) = בלי גיבוי.
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "vertex_ai/gemini-2.5-flash")
+# ברירת מחדל: מודל Gemini חינמי אחר (מכסה נפרדת מהמודל הראשי).
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "gemini/gemini-3.1-flash-lite")
 
 
 def _fallback_kwargs() -> Optional[dict]:
+    if FALLBACK_MODEL.startswith("gemini/"):
+        return {"model": FALLBACK_MODEL} if os.getenv("GEMINI_API_KEY") else None
     sa = os.getenv("VERTEX_SA_FILE", "")
     if not FALLBACK_MODEL or not sa or not os.path.exists(sa):
         return None
@@ -550,6 +553,33 @@ def _dedupe(proposals: list[dict]) -> list[dict]:
 
 _GROQ_TOOLS: Optional[list] = None
 
+# מפסק: כש-Groq חסום (מגבלת הוצאה / קצב), מדלגים עליו לזמן מה במקום
+# לנסות ולהיכשל בכל הודעה — כל ניסיון כושל הוסיף שניות לתגובה.
+_groq_down_until = 0.0
+
+
+def groq_available() -> bool:
+    import time
+    return time.time() >= _groq_down_until
+
+
+def groq_failed(msg: str) -> None:
+    """נקרא אחרי כישלון של Groq. חוסם אותו לפי סוג השגיאה."""
+    import time
+    global _groq_down_until
+    low = msg.lower()
+    if "spend_limit" in low or "billing" in low or "invalid api key" in low:
+        pause = 30 * 60
+    elif "rate_limit" in low or "429" in low or "tokens per minute" in low:
+        pause = 2 * 60
+    elif "503" in low or "over capacity" in low:
+        pause = 60
+    else:
+        return
+    if time.time() >= _groq_down_until:
+        logger.warning("Groq מושהה ל-%s דק' (%s)", pause // 60, msg[:120])
+    _groq_down_until = time.time() + pause
+
 
 def _groq_tools() -> list:
     """
@@ -602,13 +632,15 @@ async def _call_llm(messages: list) -> Optional[dict]:
     בלי להמתין: עדיף תשובה ממודל אחר מאשר "עומס" בפני המשתמש.
     """
     common = dict(messages=messages, tool_choice="auto", max_tokens=4096)
-    for attempt in (1, 2):
+    for attempt in ((1, 2) if groq_available() else ()):
         try:
-            return await acompletion(model=MODEL, tools=_groq_tools(), **common)
+            tools = _groq_tools() if MODEL.startswith("groq/") else TOOLS
+            return await acompletion(model=MODEL, tools=tools, **common)
         except Exception as exc:
             msg = str(exc)
             logger.warning("המודל הראשי נכשל (%s): %s", type(exc).__name__,
                            msg[:200])
+            groq_failed(msg)
             # המודל "הזה" שם כלי לא קיים / ארגומנט לא תקין — לרוב חולף בניסיון שני
             if attempt == 1 and "Tool call validation failed" in msg:
                 continue
@@ -637,6 +669,8 @@ async def complete_text(prompt: str, max_tokens: int = 2000,
     order = ([fallback, primary] if long and fallback
              else [primary] + ([fallback] if fallback else []))
     for kw in order:
+        if kw is primary and not groq_available():
+            continue
         try:
             resp = await acompletion(**kw, messages=messages,
                                      max_tokens=max(max_tokens, 1024))
@@ -646,6 +680,8 @@ async def complete_text(prompt: str, max_tokens: int = 2000,
         except Exception as exc:
             logger.warning("complete_text נכשל ב-%s: %s", kw.get("model"),
                            str(exc)[:200])
+            if kw is primary:
+                groq_failed(str(exc))
     return None
 
 
