@@ -144,19 +144,23 @@ async def transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
     כל כישלון נרשם עם הסיבה המלאה מהשרת.
     """
     errors = []
-    if GROQ_API_KEY:
+    from app import agent
+    if GROQ_API_KEY and agent.groq_available():
         text, err = await _groq_whisper(audio, mime, WHISPER_MODEL, True)
         if text:
             return text
         errors.append(err)
+        agent.groq_failed(err)
+    if GROQ_API_KEY and agent.groq_available():
         mp3 = await asyncio.to_thread(_to_mp3, audio) or audio
         text, err = await _groq_whisper(mp3, "audio/mpeg", FALLBACK_WHISPER, False)
         if text:
             logger.warning("תמלול הצליח רק בגיבוי Groq. שגיאה ראשונה: %s", errors[0])
             return text
         errors.append(err)
+        agent.groq_failed(err)
     else:
-        errors.append("GROQ_API_KEY חסר")
+        errors.append("Groq לא זמין כרגע" if GROQ_API_KEY else "GROQ_API_KEY חסר")
         mp3 = await asyncio.to_thread(_to_mp3, audio) or audio
 
     text = await _gemini_transcribe(mp3)

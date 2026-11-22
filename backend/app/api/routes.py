@@ -53,6 +53,36 @@ async def dashboard_view(key: str = "", view: str = "today"):
     return HTMLResponse(html_out)
 
 
+@router.get("/dashboard/manifest.webmanifest")
+async def dashboard_manifest(key: str = ""):
+    """מאפשר 'הוספה למסך הבית' — הדאשבורד נפתח כאפליקציה במסך מלא."""
+    from fastapi.responses import JSONResponse
+    from app import dashboard as dash
+    if not dash.token_ok(key):
+        return JSONResponse({}, status_code=404)
+    return JSONResponse({
+        "name": "ניקול",
+        "short_name": "ניקול",
+        "start_url": f"/dashboard?key={key}",
+        "scope": "/dashboard",
+        "display": "standalone",
+        "dir": "rtl",
+        "lang": "he",
+        "background_color": "#0E1026",
+        "theme_color": "#0E1026",
+        "icons": [{"src": "/dashboard/icon.png", "sizes": "512x512",
+                   "type": "image/png", "purpose": "any maskable"}],
+    }, media_type="application/manifest+json")
+
+
+@router.get("/dashboard/icon.png")
+async def dashboard_icon():
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    return FileResponse(Path(__file__).resolve().parent.parent / "nikol-icon.png",
+                        media_type="image/png")
+
+
 @router.post("/dashboard/chat")
 async def dashboard_chat(payload: dict):
     """צ'אט מהפאנל בדאשבורד — אותה ניקול, אותה היסטוריה, בלי טלגרם באמצע."""
