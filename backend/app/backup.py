@@ -17,6 +17,7 @@ Drive מחייבת אישור מחדש של החשבון. אפשר, אבל זה 
 שטלגרם פותר בחינם.
 """
 
+import asyncio
 import gzip
 import io
 import json
@@ -100,8 +101,53 @@ def _rotate_files(files) -> int:
     return removed
 
 
+# --------------------------------------------- הצפנה
+# הגיבוי בטלגרם מכיל מיילים, פתקים והיסטוריית שיחות — ושיחות בוט בטלגרם
+# אינן מוצפנות קצה-לקצה. עם BACKUP_PASSPHRASE ב-.env, מה שיוצא מהשרת מוצפן
+# ב-AES-256 (openssl). העותקים המקומיים בשרת נשארים כמו שהם.
+# פענוח ידני (Linux/Mac/Git Bash):
+#   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in FILE.enc -out FILE
+BACKUP_PASSPHRASE = os.getenv("BACKUP_PASSPHRASE", "")
+_OPENSSL = ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "600000",
+            "-pass", "env:BACKUP_PASSPHRASE"]
+
+
+def _openssl(args: list, data: bytes) -> bytes:
+    import subprocess
+    env = {**os.environ, "BACKUP_PASSPHRASE": BACKUP_PASSPHRASE}
+    out = subprocess.run(_OPENSSL + args, input=data, capture_output=True,
+                         env=env, timeout=300, check=True)
+    return out.stdout
+
+
+def encrypt_file(path: Path) -> Path:
+    """מחזיר נתיב לעותק מוצפן (.enc). בלי סיסמה — את המקור."""
+    if not BACKUP_PASSPHRASE:
+        return path
+    enc = path.with_name(path.name + ".enc")
+    enc.write_bytes(_openssl(["-salt"], path.read_bytes()))
+    return enc
+
+
+def decrypt_bytes(blob: bytes) -> bytes:
+    return _openssl(["-d"], blob)
+
+
 async def upload(path: Path) -> bool:
-    """שולח את הגיבוי לטלגרם — עותק מחוץ לשרת."""
+    """שולח את הגיבוי לטלגרם — עותק מחוץ לשרת, מוצפן אם הוגדרה סיסמה."""
+    try:
+        sent = await asyncio.to_thread(encrypt_file, path)
+    except Exception as exc:
+        logger.error("הצפנת הגיבוי נכשלה — לא נשלח: %s", exc)
+        return False
+    try:
+        return await _upload_file(sent)
+    finally:
+        if sent != path:
+            sent.unlink(missing_ok=True)
+
+
+async def _upload_file(path: Path) -> bool:
     if not TELEGRAM_API_TOKEN or not BACKUP_CHAT_ID:
         logger.warning("אין טוקן או chat_id לגיבוי — נשמר מקומית בלבד")
         return False
@@ -122,7 +168,7 @@ async def upload(path: Path) -> bool:
                                     else "גיבוי ") + f"{datetime.now(TZ):%d/%m/%Y}",
                         "disable_notification": "true",
                     },
-                    files={"document": (path.name, fh, "application/gzip")},
+                    files={"document": (path.name, fh, "application/octet-stream")},
                 )
         data = resp.json()
         ok = data.get("ok", False)
@@ -220,6 +266,10 @@ async def verify_restore() -> str:
                 continue
             try:
                 blob = await _download(client, entry["file_id"])
+                if entry["name"].endswith(".enc"):
+                    if not BACKUP_PASSPHRASE:
+                        raise ValueError("הגיבוי מוצפן אבל BACKUP_PASSPHRASE חסר")
+                    blob = await asyncio.to_thread(decrypt_bytes, blob)
                 lines.append(f"✅ {check(blob)} ({entry['name']})")
             except Exception as exc:
                 failed = True
